@@ -90,14 +90,17 @@ describe('React settings renderer', () => {
 
   it('shows an unavailable selected printer and bridge errors', async () => {
     const unavailable = { ...status, printerAvailable: false, state: 'offline' as const, message: 'Portal connection failed', lastError: 'Connection refused' };
+    const saveSettings = vi.fn(async () => { throw new Error('Cannot save settings'); });
     window.sitremConnector = mockApi({
       getStatus: vi.fn(async () => unavailable),
-      saveSettings: vi.fn(async () => { throw new Error('Cannot save settings'); }),
+      saveSettings,
     });
     render(<App />);
     expect(await screen.findByText(/not currently available/)).toBeInTheDocument();
     expect(screen.getByText(/Connection refused/)).toBeInTheDocument();
+    await screen.findByDisplayValue('Reception');
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Cannot save settings');
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Cannot save settings'));
   });
 });
