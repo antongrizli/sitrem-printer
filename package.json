@@ -50,6 +50,7 @@
       "package.json"
     ],
     "mac": {
+      "icon": "src/assets/sitrem-icon.icns",
       "target": [
         "dmg"
       ],
