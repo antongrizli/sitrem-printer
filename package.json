@@ -51,12 +51,14 @@
     ],
     "mac": {
       "icon": "src/assets/sitrem-icon.icns",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         "dmg"
       ],
       "hardenedRuntime": true
     },
     "win": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         "nsis"
       ]

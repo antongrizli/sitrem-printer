@@ -25,7 +25,7 @@ npm ci
 uses Electron's single-instance lock, so running the script again exits without
 creating another tray item or polling loop.
 
-Create distributable packages after configuring platform signing credentials:
+Create distributable packages locally:
 
 ```sh
 npm run package:dir # unpacked smoke-test application
@@ -33,8 +33,27 @@ npm run package:mac # DMG
 npm run package:win # NSIS installer
 ```
 
-Set `SITREM_UPDATE_URL` to the release feed when packaging releases. Signing,
-macOS notarization, and updater activation are separate release tasks.
+Pass `--x64` or `--arm64` after `--` to select an architecture, for example
+`npm run package:mac -- --arm64`. Installer names include the architecture, such
+as `SitremPrinter-0.1.0-arm64.dmg` and `SitremPrinter-0.1.0-x64.exe`.
+
+## GitHub release packages
+
+The **Package desktop apps** GitHub Actions workflow builds separate x64 and
+ARM64 packages for macOS and Windows. Run it manually from the Actions tab to
+produce downloadable workflow artifacts without creating a release.
+
+To create a GitHub Release, update the version in `package.json` and push an
+exactly matching `v<version>` tag, such as `v0.1.0`. A mismatched version tag
+fails validation before packaging. Successful tag builds attach all four
+installers and their blockmaps to a release with generated notes.
+
+CI packages are unsigned and the macOS package is not notarized. macOS
+Gatekeeper and Windows SmartScreen may therefore warn when they are opened.
+Code signing, notarization, updater feed metadata, and updater activation are
+separate release tasks. CI uses the non-routable `https://updates.invalid/`
+placeholder required by the current packaging configuration. Set
+`SITREM_UPDATE_URL` when packaging for a real external generic update feed.
 
 ## Configuration and connection
 
