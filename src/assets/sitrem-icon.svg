@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">SITREM workflow icon</title>
+  <defs>
+    <linearGradient id="background" x1="18" y1="12" x2="112" y2="118" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#211444"/>
+      <stop offset="1" stop-color="#10091F"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="24" y1="98" x2="110" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22D3EE"/>
+      <stop offset="0.52" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#A78BFA"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="128" height="128" rx="32" fill="url(#background)"/>
+  <rect x="1" y="1" width="126" height="126" rx="31" fill="none" stroke="#C4B5FD" stroke-opacity=".18" stroke-width="2"/>
+  <g transform="translate(-8)">
+    <g fill="none" stroke="url(#flow)" stroke-linecap="round" stroke-linejoin="round" stroke-width="10" filter="url(#glow)">
+      <path d="M75 32H54L34 52v28"/><path d="m20 78 14 14 14-14"/><path d="M66 96H84l24-24V48"/><path d="m94 46 14-14 14 14"/>
+    </g>
+    <g fill="#150D2B" stroke="url(#flow)" stroke-width="8"><circle cx="75" cy="32" r="10"/><circle cx="66" cy="96" r="10"/></g>
+    <circle cx="75" cy="32" r="3" fill="#E9D5FF"/><circle cx="66" cy="96" r="3" fill="#CFFAFE"/>
+  </g>
+</svg>

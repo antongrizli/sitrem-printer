@@ -1,0 +1,70 @@
+{
+  "name": "sitrem-printer",
+  "version": "0.1.0",
+  "description": "Secure SITREM desktop connector for system label printers",
+  "author": "SITREM",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=22.17.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "build": "npm run typecheck && npm test && electron-vite build",
+    "package:dir": "npm run build && electron-builder --dir",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:win": "npm run build && electron-builder --win",
+    "run:local": "npm start"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^37.0.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^29.1.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@bwip-js/node": "^4.11.2",
+    "electron-updater": "^6.8.9",
+    "zod": "^4.4.3"
+  },
+  "build": {
+    "appId": "com.sitrem.printer",
+    "productName": "SitremPrinter",
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "hardenedRuntime": true
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "${env.SITREM_UPDATE_URL}"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+data/
+connector-state.json
+node_modules/
+dist/
+out/
+coverage/
+release/
+.DS_Store
