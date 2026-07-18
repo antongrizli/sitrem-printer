@@ -48,6 +48,10 @@ exactly matching `v<version>` tag, such as `v0.1.0`. A mismatched version tag
 fails validation before packaging. Successful tag builds attach all four
 installers and their blockmaps to a release with generated notes.
 
+Use `./scripts/bump-version.sh major`, `minor`, or `patch` to update the npm
+version and lockfile without committing or tagging. Commit its changes, then
+push the printed `v<version>` tag to start a release build.
+
 CI packages are unsigned and the macOS package is not notarized. macOS
 Gatekeeper and Windows SmartScreen may therefore warn when they are opened.
 Code signing, notarization, updater feed metadata, and updater activation are
