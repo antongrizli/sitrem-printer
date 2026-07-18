@@ -1,6 +1,6 @@
 {
   "name": "sitrem-printer",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Secure SITREM desktop connector for system label printers",
   "author": "SITREM",
   "private": true,
