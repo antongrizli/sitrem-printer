@@ -39,7 +39,7 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@bwip-js/node": "^4.11.2",
+    "@bwip-js/node": "^4.11.4",
     "css-tree": "^3.2.1",
     "parse5": "^8.0.1",
     "zod": "^4.4.3"
