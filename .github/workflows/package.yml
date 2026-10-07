@@ -80,14 +80,30 @@ jobs:
       - name: Build application
         run: npm run build
 
-      - name: Package application
-        env:
-          CSC_LINK: ${{ inputs.production && (matrix.platform == 'macos' && secrets.MAC_CSC_LINK || secrets.WIN_CSC_LINK) || '' }}
-          CSC_KEY_PASSWORD: ${{ inputs.production && (matrix.platform == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || secrets.WIN_CSC_KEY_PASSWORD) || '' }}
-          APPLE_ID: ${{ inputs.production && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.production && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ inputs.production && secrets.APPLE_TEAM_ID || '' }}
+      - name: Package unsigned application
+        if: ${{ !inputs.production }}
         run: npx electron-builder --${{ matrix.target }} --${{ matrix.arch }} --publish=never
+
+      - name: Package signed macOS application
+        if: inputs.production && matrix.platform == 'macos'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          node -e "for (const key of ['CSC_LINK', 'APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID']) { if (!process.env[key]) { console.error('Required signing secret is missing: ' + key); process.exit(1); } }"
+          npx electron-builder --mac --${{ matrix.arch }} --publish=never
+
+      - name: Package signed Windows application
+        if: inputs.production && matrix.platform == 'windows'
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          node -e "if (!process.env.CSC_LINK) { console.error('Required signing secret is missing: WIN_CSC_LINK'); process.exit(1); }"
+          npx electron-builder --win --${{ matrix.arch }} --publish=never
 
       - name: Native packaged application smoke test
         run: node scripts/smoke-package.mjs ${{ matrix.arch }}
