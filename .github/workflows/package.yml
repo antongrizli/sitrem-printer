@@ -57,6 +57,8 @@ jobs:
       # electron-builder requires the configured generic provider URL to expand.
       # Auto-updates are not active, and updater metadata is not published here.
       SITREM_UPDATE_URL: https://updates.invalid/
+      # Force BCJ 7z compression filter to fix missing binaries on Windows ARM64 caused by nsis7z codec incompatibility
+      ELECTRON_BUILDER_7Z_FILTER: "BCJ"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
