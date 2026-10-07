@@ -22,6 +22,10 @@ describe('label payload validation', () => {
       '<svg onload="alert(1)"/>',
       '<style>@import "https://example.test/font.css"</style>',
       '<style>.x{background:url(data:image/png;base64,AAAA)}</style>',
+      '<svg><foreignObject><iframe src="data:text/html,unsafe"></iframe></foreignObject></svg>',
+      '<img src="data:image/svg+xml;base64,AAAA">',
+      '<div style="background:u\\72l(https://example.test)">x</div>',
+      '<svg><use href="https://example.test/x#label"/></svg>',
     ]) expect(() => validateLabelHtml(unsafe)).toThrow(/self-contained/);
   });
 

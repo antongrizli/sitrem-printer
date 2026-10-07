@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { LabelSizeSchema, PrintJobPayloadV1Schema, type PrintJobPayloadV1 } from './label-schema.ts';
+import { validateStructuredLabel } from './label-security.ts';
 
 export * from './label-schema.ts';
 
@@ -28,9 +29,7 @@ export function checksumFor({ html }: Pick<PrintJobPayloadV1, 'html'>): string {
 
 /** Reject executable, navigable, submitted, and remotely loaded markup. */
 export function validateLabelHtml(html: string): void {
-  if (typeof html !== 'string' || html.length === 0 || html.length > 1_000_000) throw new Error('html must be a non-empty document below 1 MB');
-  const unsafe = /<\s*(script|iframe|object|embed|link|base|form)\b|\bon\w+\s*=|\b(?:src|href|action|formaction|poster)\s*=\s*["']?\s*(?!data:|#)|@import|url\s*\(/i;
-  if (unsafe.test(html)) throw new Error('html must be self-contained and contain no scripts, remote URLs, forms, or event handlers');
+  validateStructuredLabel(html);
 }
 
 export function parsePrintJobPayload(value: unknown): PrintJobPayloadV1 {

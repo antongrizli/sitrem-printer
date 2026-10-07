@@ -24,10 +24,11 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@types/css-tree": "^3.2.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "^37.0.0",
+    "electron": "^44.6.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "jsdom": "^29.1.1",
@@ -39,7 +40,8 @@
   },
   "dependencies": {
     "@bwip-js/node": "^4.11.2",
-    "electron-updater": "^6.8.9",
+    "css-tree": "^3.2.1",
+    "parse5": "^8.0.1",
     "zod": "^4.4.3"
   },
   "build": {
@@ -68,11 +70,6 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
     },
-    "publish": [
-      {
-        "provider": "generic",
-        "url": "${env.SITREM_UPDATE_URL}"
-      }
-    ]
+    "publish": null
   }
 }

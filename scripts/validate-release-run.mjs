@@ -1,0 +1,13 @@
+import { execFileSync } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+const repo = process.env.GITHUB_REPOSITORY;
+const id = process.env.SOURCE_RUN;
+if (!repo || !/^\d+$/.test(id || '')) throw new Error('Numeric source run ID is required');
+const api = (path) => JSON.parse(execFileSync('gh', ['api', `repos/${repo}/${path}`], { encoding: 'utf8' }));
+const run = api(`actions/runs/${id}`);
+if (run.repository.full_name !== repo || run.path !== '.github/workflows/package.yml' || !['push', 'workflow_dispatch'].includes(run.event) || run.status !== 'completed') throw new Error('Unexpected source workflow or repository');
+const jobs = api(`actions/runs/${id}/jobs?per_page=100`).jobs;
+const required = new Set(['Package macos x64', 'Package macos arm64', 'Package windows x64', 'Package windows arm64']);
+for (const job of jobs) if (required.has(job.name) && job.conclusion === 'success') required.delete(job.name);
+if (required.size) throw new Error('Source package jobs did not all succeed');
+appendFileSync(process.env.GITHUB_OUTPUT, `sha=${run.head_sha}\n`);

@@ -10,4 +10,6 @@ export const IPC_CHANNELS = {
   testPrint: 'connector:test-print',
   getLogs: 'connector:get-logs',
   openPrinterSettings: 'connector:open-printer-settings',
+  statusChanged: 'connector:status-changed',
+  diagnostics: 'connector:diagnostics',
 } as const;

@@ -83,7 +83,7 @@ describe('ConnectorService', () => {
     await vi.waitFor(() => expect(calls.some((url) => url.endsWith('/claim'))).toBe(true));
     expect(calls[0]).toContain('/jobs/job-old/acknowledge');
     expect(print).not.toHaveBeenCalled();
-    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toEqual({});
+    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toMatchObject({ schemaVersion: 1, entries: [{ state: 'spooled', acknowledged: true }] });
   });
 
   it('heartbeats, claims, prints, and acknowledges one valid job', async () => {
@@ -107,7 +107,7 @@ describe('ConnectorService', () => {
     await vi.waitFor(() => expect(print).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(requestBodies).toContainEqual({ result: 'spooled' }));
     expect(requestBodies).toContainEqual({ version: '1.2.3', os: 'darwin', deviceName: 'VRETTI 420B' });
-    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toEqual({});
+    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toMatchObject({ schemaVersion: 1, entries: [{ state: 'spooled', acknowledged: true }] });
   });
 
   it('reports invalid claimed HTML instead of printing it', async () => {

@@ -1,325 +1,206 @@
 import bwipjs from '@bwip-js/node';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import {
-  ActivityLogEntrySchema,
-  ConnectorRuntimeSchema,
-  EditableSettingsSchema,
-  JournalSchema,
-  LabelSizeSchema,
-  PairingInputSchema,
-  type ActivityLogEntry,
-  type ConnectorRuntime,
-  type ConnectorStatus,
-  type EditableSettings,
-  type Journal,
-  type LabelSize,
-  type PairingInput,
-  type PairingResult,
-} from '../shared/contracts.ts';
-import { createPayload, parsePrintJobPayload, type PrintJobPayloadV1 } from '../shared/label.ts';
-import type { ElectronPrintEngine } from './print-engine.ts';
+import { ActivityLogEntrySchema, ConnectorRuntimeSchema, EditableSettingsSchema, LabelSizeSchema, PairingInputSchema,
+  type ActivityLogEntry, type ConnectorRuntime, type ConnectorStatus, type EditableSettings, type LabelSize, type PairingInput, type PairingResult } from '../shared/contracts.ts';
+import { createPayload } from '../shared/label.ts';
+import { PrintCoordinator, type PrintEngine } from './print-engine.ts';
+import { abortableDelay, PortalClient, PortalHttpError, ConnectorRevokedError, type SessionIdentity } from './portal-client.ts';
+import { JournalStore, readJson, writeJson, StorageError } from './storage.ts';
+import { JobProcessor } from './job-processor.ts';
 
 export interface SecureStorage {
   isEncryptionAvailable(): boolean;
   encryptString(value: string): Buffer;
   decryptString(value: Buffer): string;
 }
-
-type Credentials = { connectorId: string; token: string };
-type ConnectorServiceOptions = {
-  userDataPath: string;
-  secureStorage: SecureStorage;
-  printer: ElectronPrintEngine;
-  version: string;
-  os: string;
-  fetchFn?: typeof fetch;
-  delay?: (milliseconds: number) => Promise<void>;
-  now?: () => Date;
+type Options = {
+  userDataPath: string; secureStorage: SecureStorage; printer: PrintEngine; version: string; os: string;
+  fetchFn?: typeof fetch; delay?: (milliseconds: number) => Promise<void>; now?: () => Date; requestTimeoutMs?: number;
 };
-
-const PairingResponseSchema = z.object({ connectorId: z.string().min(1), token: z.string().min(1) }).strict();
-const StoredCredentialsSchema = z.object({ connectorId: z.string().min(1), token: z.string().min(1) });
-const LogSchema = z.array(ActivityLogEntrySchema);
-
-class ConnectorRevokedError extends Error {}
+const PairResponse = z.object({ connectorId: z.string().min(1).max(255).regex(/^[A-Za-z0-9_-]+$/), token: z.string().min(1).max(4096) }).strict();
+const StoredSession = z.object({ schemaVersion: z.literal(1), settings: EditableSettingsSchema,
+  connectorId: z.string().min(1), token: z.string().min(1) }).strict();
 
 export class ConnectorService {
-  private readonly statePath: string;
-  private readonly credentialsPath: string;
-  private readonly settingsPath: string;
-  private readonly logPath: string;
-  private readonly fetchFn: typeof fetch;
-  private readonly delay: (milliseconds: number) => Promise<void>;
-  private readonly now: () => Date;
   private settings: EditableSettings;
-  private runtime: ConnectorRuntime = {
-    state: 'not_paired',
-    message: 'Not paired',
-    lastHeartbeatAt: null,
-    lastError: null,
-    lastJobAt: null,
-  };
-  private stopped = false;
+  private identity: SessionIdentity | null = null;
+  private journal: JournalStore | undefined;
+  private runtime: ConnectorRuntime = { state: 'not_paired', message: 'Not paired', lastHeartbeatAt: null, lastError: null, lastJobAt: null };
   private loopPromise: Promise<void> | null = null;
   private abortController = new AbortController();
+  private stopped = true;
+  private pairing = false;
+  private storageFailure: string | null = null;
+  private readonly listeners = new Set<() => void>();
+  private logs: ActivityLogEntry[] = [];
+  private discovery: { at: number; printers: string[]; error: string | null } | undefined;
+  private discoveryPromise: Promise<void> | undefined;
+  private readonly printer: PrintCoordinator;
+  private readonly now: () => Date;
+  private readonly fetchFn: typeof fetch;
+  private readonly sessionPath: string;
 
-  constructor(private readonly options: ConnectorServiceOptions) {
-    this.statePath = join(options.userDataPath, 'print-journal.json');
-    this.credentialsPath = join(options.userDataPath, 'connector-credentials.json');
-    this.settingsPath = join(options.userDataPath, 'connector-settings.json');
-    this.logPath = join(options.userDataPath, 'activity-log.json');
+  constructor(private readonly options: Options) {
+    this.sessionPath = join(options.userDataPath, 'connector-session.json');
     this.fetchFn = options.fetchFn ?? fetch;
-    this.delay = options.delay ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.now = options.now ?? (() => new Date());
-    this.settings = this.loadSettings();
-  }
-
-  private readJson(path: string): unknown {
-    if (!existsSync(path)) return undefined;
-    try { return JSON.parse(readFileSync(path, 'utf8')) as unknown; } catch { return undefined; }
-  }
-
-  private persist(path: string, value: unknown): void {
-    const temporary = `${path}.tmp`;
-    writeFileSync(temporary, JSON.stringify(value));
-    renameSync(temporary, path);
-  }
-
-  private loadSettings(): EditableSettings {
-    const defaults = {
-      portalUrl: (process.env.SITREM_PORTAL_URL || 'http://127.0.0.1:3010').replace(/\/$/, ''),
-      printerName: process.env.SITREM_PRINTER_NAME || '',
-      connectorName: process.env.SITREM_CONNECTOR_NAME || 'SitremPrinter',
-    };
-    const parsed = EditableSettingsSchema.safeParse({ ...defaults, ...(this.readJson(this.settingsPath) as object | undefined) });
-    return parsed.success ? parsed.data : EditableSettingsSchema.parse(defaults);
-  }
-
-  private loadCredentials(): Credentials | null {
-    if (!this.options.secureStorage.isEncryptionAvailable()) return null;
-    const stored = StoredCredentialsSchema.safeParse(this.readJson(this.credentialsPath));
-    if (!stored.success) return null;
+    this.printer = new PrintCoordinator(options.printer);
+    this.settings = EditableSettingsSchema.parse({ portalUrl: process.env.SITREM_PORTAL_URL || 'http://127.0.0.1:3010',
+      printerName: process.env.SITREM_PRINTER_NAME || '', connectorName: process.env.SITREM_CONNECTOR_NAME || 'SitremPrinter' });
     try {
-      return { connectorId: stored.data.connectorId, token: this.options.secureStorage.decryptString(Buffer.from(stored.data.token, 'base64')) };
-    } catch { return null; }
+      const session = readJson(this.sessionPath);
+      if (session !== undefined) {
+        const record = StoredSession.parse(session);
+        this.settings = record.settings;
+        this.identity = this.decrypt(record.connectorId, record.token, record.settings.portalUrl);
+      } else {
+        const legacySettings = readJson(join(options.userDataPath, 'connector-settings.json'));
+        if (legacySettings !== undefined) this.settings = EditableSettingsSchema.parse(legacySettings);
+        const credentials = readJson(join(options.userDataPath, 'connector-credentials.json'));
+        if (credentials !== undefined) {
+          if (legacySettings === undefined) throw new StorageError('Legacy credential portal identity is missing. Preserve the journal for recovery.');
+          const record = PairResponse.parse(credentials);
+          this.identity = this.decrypt(record.connectorId, record.token, this.settings.portalUrl);
+          this.commitSession(this.settings, this.identity);
+        }
+      }
+      this.journal = new JournalStore(join(options.userDataPath, 'print-journal.json'), {
+        portalUrl: this.settings.portalUrl, connectorId: this.identity?.connectorId ?? 'unpaired' });
+    } catch (error) {
+      this.storageFailure = this.message(error);
+      this.setRuntime({ state: 'attention', message: 'Local state needs recovery; printing is blocked', lastError: this.storageFailure });
+    }
+    try { this.logs = z.array(ActivityLogEntrySchema).parse(readJson(join(options.userDataPath, 'activity-log.json')) ?? []); } catch { this.logs = []; }
   }
-
-  private saveCredentials(credentials: Credentials): void {
-    if (!this.options.secureStorage.isEncryptionAvailable()) throw new Error('OS secure credential storage is unavailable');
-    this.persist(this.credentialsPath, {
-      connectorId: credentials.connectorId,
-      token: this.options.secureStorage.encryptString(credentials.token).toString('base64'),
-    });
+  private decrypt(connectorId: string, encrypted: string, portalUrl: string): SessionIdentity {
+    if (!this.options.secureStorage.isEncryptionAvailable()) throw new StorageError('OS secure storage unavailable; unlock the user session and restart.');
+    return Object.freeze({ portalUrl, connectorId, token: this.options.secureStorage.decryptString(Buffer.from(encrypted, 'base64')) });
   }
-
-  private loadJournal(): Journal {
-    const parsed = JournalSchema.safeParse(this.readJson(this.statePath));
-    return parsed.success ? parsed.data : {};
+  private commitSession(settings: EditableSettings, identity: SessionIdentity): void {
+    if (!this.options.secureStorage.isEncryptionAvailable()) throw new StorageError('OS secure credential storage unavailable');
+    writeJson(this.sessionPath, { schemaVersion: 1, settings, connectorId: identity.connectorId,
+      token: this.options.secureStorage.encryptString(identity.token).toString('base64') });
   }
-
-  private loadLogs(): ActivityLogEntry[] {
-    const parsed = LogSchema.safeParse(this.readJson(this.logPath));
-    return parsed.success ? parsed.data : [];
-  }
-
   private log(event: string, detail = ''): void {
-    const entries = this.loadLogs();
-    entries.unshift({ at: this.now().toISOString(), event, detail });
-    this.persist(this.logPath, entries.slice(0, 100));
+    this.logs.unshift({ at: this.now().toISOString(), event, detail }); this.logs = this.logs.slice(0, 100);
+    try { writeJson(join(this.options.userDataPath, 'activity-log.json'), this.logs); } catch { /* diagnostics never change print results */ }
   }
-
   private setRuntime(update: Partial<ConnectorRuntime>): void {
     this.runtime = ConnectorRuntimeSchema.parse({ ...this.runtime, ...update });
+    for (const listener of this.listeners) listener();
   }
-
+  subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   async getStatus(): Promise<ConnectorStatus> {
-    let printers: Awaited<ReturnType<ElectronPrintEngine['printers']>> = [];
-    let printerError: string | null = null;
-    try {
-      printers = await this.options.printer.printers();
-    } catch (error) {
-      printerError = `Unable to read system printers: ${this.asMessage(error)}`;
+    if (!this.discovery || this.now().getTime() - this.discovery.at >= 10_000) {
+      this.discoveryPromise ??= (async () => {
+        try { this.discovery = { at: this.now().getTime(), printers: (await this.printer.printers()).map((p) => p.name), error: null }; }
+        catch { this.discovery = { at: this.now().getTime(), printers: [], error: 'Unable to read system printers: spooler unavailable' }; }
+      })().finally(() => { this.discoveryPromise = undefined; });
+      await this.discoveryPromise;
     }
-    return {
-      ...this.settings,
-      paired: !!this.loadCredentials(),
-      printers: printers.map((printer) => printer.name),
-      printerAvailable: !!this.settings.printerName && printers.some((printer) => printer.name === this.settings.printerName),
-      printerError,
-      ...this.runtime,
-    };
+    const printers = this.discovery?.printers ?? [];
+    return { ...this.settings, paired: !!this.identity, printers, printerAvailable: !!this.settings.printerName && printers.includes(this.settings.printerName),
+      printerError: this.discovery?.error ?? null, ...this.runtime };
   }
-
-  getLogs(): ActivityLogEntry[] { return this.loadLogs(); }
-
-  getTraySnapshot(): Pick<ConnectorRuntime, 'state' | 'lastHeartbeatAt' | 'lastError'> & { printerName: string } {
-    return { state: this.runtime.state, lastHeartbeatAt: this.runtime.lastHeartbeatAt, lastError: this.runtime.lastError, printerName: this.settings.printerName };
+  invalidatePrinters(): void { this.discovery = undefined; }
+  getLogs(): ActivityLogEntry[] { return structuredClone(this.logs); }
+  getTraySnapshot() { return { ...this.runtime, printerName: this.settings.printerName }; }
+  diagnostics(): string {
+    return JSON.stringify({ version: this.options.version, os: this.options.os, architecture: process.arch, state: this.runtime.state,
+      printerName: this.settings.printerName, recovery: (this.journal?.all() ?? []).filter((r) => !r.acknowledged || r.state === 'attention')
+        .map((r) => ({ jobId: r.jobId, state: r.state, pending: !r.acknowledged, currentSession: r.portalUrl === this.identity?.portalUrl && r.connectorId === this.identity?.connectorId })),
+      events: this.logs.map(({ at, event }) => ({ at, event })) }, null, 2);
   }
-
+  private healthy(): void { if (this.storageFailure) throw new StorageError(this.storageFailure); }
+  private transport(settings: EditableSettings): void {
+    const url = new URL(settings.portalUrl);
+    if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && !settings.allowInsecureHttp)
+      throw new Error('Remote HTTP requires explicit insecure LAN opt-in. Use HTTPS whenever possible.');
+  }
   async pair(candidate: PairingInput): Promise<PairingResult> {
+    this.healthy(); if (this.pairing) throw new Error('Pairing is already in progress');
     const input = PairingInputSchema.parse(candidate);
-    this.settings = EditableSettingsSchema.parse(input);
-    this.persist(this.settingsPath, this.settings);
-    const response = await this.fetchFn(`${this.settings.portalUrl}/api/print/connectors/pair`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code: input.pairingCode, name: input.connectorName }),
-    });
-    const body = await response.json().catch(() => ({})) as unknown;
-    if (!response.ok) throw new Error(this.errorMessage(body, `Pairing failed (HTTP ${response.status})`));
-    const credentials = PairingResponseSchema.parse(body);
-    this.saveCredentials(credentials);
-    this.log('paired', credentials.connectorId);
-    this.setRuntime({ state: 'starting', message: 'Paired; starting Connector…', lastError: null });
-    return { connectorId: credentials.connectorId };
+    const settings = EditableSettingsSchema.parse(input); this.transport(settings);
+    this.pairing = true;
+    const wasRunning = !this.stopped;
+    try {
+      await this.shutdown(); await this.printer.idle();
+      const response = await this.fetchFn(`${settings.portalUrl}/api/print/connectors/pair`, {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 15_000),
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: input.pairingCode, name: input.connectorName }),
+      });
+      if (!response.ok) throw new Error(`Pairing failed (HTTP ${response.status})`);
+      const credentials = PairResponse.parse(await response.json());
+      const identity = Object.freeze({ ...credentials, portalUrl: settings.portalUrl });
+      this.commitSession(settings, identity);
+      this.settings = settings; this.identity = identity;
+      this.log('paired', credentials.connectorId);
+      this.setRuntime({ state: 'starting', message: 'Paired; ready to start', lastError: null });
+      return { connectorId: credentials.connectorId };
+    } finally { this.pairing = false; if (wasRunning) this.start(); }
   }
-
   saveSettings(candidate: EditableSettings): void {
-    const next = EditableSettingsSchema.parse(candidate);
-    if (this.loadCredentials() && next.portalUrl !== this.settings.portalUrl) throw new Error('Changing the portal URL requires pairing again with a new pairing code.');
-    this.settings = next;
-    this.persist(this.settingsPath, this.settings);
+    this.healthy(); if (this.pairing) throw new Error('Wait for pairing to finish');
+    const next = EditableSettingsSchema.parse(candidate); this.transport(next);
+    if (this.identity && next.portalUrl !== this.identity.portalUrl) throw new Error('Changing the portal URL requires pairing again with a new pairing code.');
+    if (this.identity) this.commitSession(next, this.identity); else writeJson(join(this.options.userDataPath, 'connector-settings.json'), next);
+    this.settings = next; this.invalidatePrinters(); this.setRuntime({});
   }
-
   start(): void {
-    if (this.loopPromise) return;
-    const credentials = this.loadCredentials();
-    if (!credentials) {
-      this.setRuntime({ state: 'not_paired', message: 'Not paired', lastError: null });
-      return;
-    }
-    this.stopped = false;
-    this.abortController = new AbortController();
-    this.loopPromise = this.run(credentials)
-      .catch((error: unknown) => {
-        const message = this.asMessage(error);
-        this.setRuntime({ state: 'error', message: 'Connector stopped unexpectedly', lastError: message });
-        this.log('connector_error', message);
-      })
-      .finally(() => { this.loopPromise = null; });
+    if (this.loopPromise || this.pairing || this.storageFailure) return;
+    if (!this.identity) { this.setRuntime({ state: 'not_paired', message: 'Not paired', lastError: null }); return; }
+    try { this.transport(this.settings); } catch (error) { this.setRuntime({ state: 'attention', message: 'Confirm insecure LAN access in Configuration', lastError: this.message(error) }); return; }
+    this.stopped = false; this.abortController = new AbortController();
+    this.loopPromise = this.run(this.identity).catch((error: unknown) => {
+      if (error instanceof StorageError) this.storageFailure = this.message(error);
+      this.setRuntime({ state: 'attention', message: 'Connector paused; review recovery status', lastError: this.message(error) });
+    }).finally(() => { this.loopPromise = null; });
   }
-
-  async restart(): Promise<void> {
-    this.stop();
-    if (this.loopPromise) await this.loopPromise;
-    this.start();
-  }
-
-  stop(): void {
-    this.stopped = true;
-    this.abortController.abort();
-  }
-
+  stop(): void { this.stopped = true; this.abortController.abort(); }
+  async shutdown(): Promise<void> { this.stop(); await this.loopPromise; }
+  async restart(): Promise<void> { await this.shutdown(); this.start(); }
   async testPrint(candidate: LabelSize): Promise<void> {
+    this.healthy(); if (this.pairing) throw new Error('Wait for pairing to finish');
+    const printerName = this.settings.printerName;
     const size = LabelSizeSchema.parse(candidate);
-    const barcode = await bwipjs.toSVG({ bcid: 'code128', text: 'SITREM-TEST-420B', includetext: true, scale: 2 });
-    const html = `<!doctype html><style>@page{size:${size.widthMm}mm ${size.heightMm}mm;margin:0}html,body{margin:0;width:${size.widthMm}mm;height:${size.heightMm}mm;font:8pt Arial}.label{box-sizing:border-box;border:1mm solid #000;width:100%;height:100%;padding:1mm;background:repeating-linear-gradient(90deg,#ddd 0 .1mm,transparent .1mm 1mm),repeating-linear-gradient(0deg,#ddd 0 .1mm,transparent .1mm 1mm)}h1{margin:0;font-size:10pt;background:#fff;width:max-content}.meta{background:#fff;width:max-content;margin-top:1mm}.bar{position:absolute;bottom:1mm;left:1mm;right:1mm;height:12mm;background:#fff}.bar svg{width:100%;height:100%}</style><main class="label"><h1>SITREM calibration test grid</h1><div class="meta">${size.widthMm} × ${size.heightMm} mm · verify all edges · ${this.now().toISOString()}</div><div class="bar">${barcode}</div></main>`;
-    const payload = createPayload({ connectorId: 'local-test', idempotencyKey: `test-${this.now().getTime()}`, html, widthMm: size.widthMm, heightMm: size.heightMm, orientation: 'portrait', copies: 1 });
-    await this.options.printer.print(payload, this.settings.printerName);
-    this.log('test_label_spooled', `${size.widthMm}×${size.heightMm} mm`);
+    const barcode = bwipjs.toSVG({ bcid: 'code128', text: 'SITREM-TEST-420B', includetext: true, scale: 2 });
+    const html = `<!doctype html><style>@page{size:${size.widthMm}mm ${size.heightMm}mm;margin:0}html,body{margin:0;width:${size.widthMm}mm;height:${size.heightMm}mm;font:8pt Arial}.label{box-sizing:border-box;border:1mm solid #000;width:100%;height:100%;padding:1mm}h1{margin:0;font-size:10pt}.bar{height:12mm}.bar svg{width:100%;height:100%}</style><main class="label"><h1>SITREM calibration grid</h1><p>${size.widthMm} × ${size.heightMm} mm · verify edges · ${this.now().toISOString()}</p><div class="bar">${barcode}</div></main>`;
+    await this.printer.print(createPayload({ connectorId: 'local-test', idempotencyKey: `test-${this.now().getTime()}`, html, ...size, orientation: 'portrait', copies: 1 }), printerName);
+    this.log('test_label_spooled');
   }
-
-  private async run(credentials: Credentials): Promise<void> {
-    const journal = this.loadJournal();
-    this.setRuntime({ state: 'starting', message: 'Recovering local print journal…', lastError: null });
-    try { await this.recover(credentials, journal); }
-    catch (error) { this.setRuntime({ state: 'error', message: 'Recovery could not reach the portal', lastError: this.asMessage(error) }); }
-
-    let heartbeatAt = 0;
+  private async run(identity: SessionIdentity): Promise<void> {
+    const client = new PortalClient(identity, this.fetchFn, this.options.requestTimeoutMs);
+    const signal = this.abortController.signal;
+    const processor = new JobProcessor(client, this.journal!, this.printer, this.now, this.setRuntime.bind(this), this.log.bind(this));
+    let heartbeatAt = 0; let failures = 0;
     while (!this.stopped) {
       try {
-        if (Date.now() >= heartbeatAt) {
-          this.setRuntime({ state: 'connecting', message: 'Sending heartbeat to portal…', lastError: null });
-          await this.request(credentials, `/api/print/connectors/${credentials.connectorId}/heartbeat`, {
-            method: 'POST',
-            body: JSON.stringify({ version: this.options.version, os: this.options.os, deviceName: this.settings.printerName }),
-          });
-          this.setRuntime({ state: 'online', message: 'Connected to portal; waiting for print jobs', lastHeartbeatAt: this.now().toISOString(), lastError: null });
-          heartbeatAt = Date.now() + 30_000;
+        await processor.recover(signal);
+        if (this.stopped) break;
+        if (this.now().getTime() >= heartbeatAt) {
+          await client.request(`/api/print/connectors/${encodeURIComponent(identity.connectorId)}/heartbeat`, {
+            method: 'POST', body: JSON.stringify({ version: this.options.version, os: this.options.os, deviceName: this.settings.printerName }),
+          }, signal);
+          this.setRuntime({ state: 'online', message: 'Connected; waiting for print jobs', lastHeartbeatAt: this.now().toISOString(), lastError: null });
+          heartbeatAt = this.now().getTime() + 30_000;
         }
-        const rawJob = await this.request(credentials, `/api/print/connectors/${credentials.connectorId}/claim`);
-        if (rawJob) await this.processClaim(credentials, journal, rawJob);
-        else await this.delay(1_000);
+        const rawJob = await client.request(`/api/print/connectors/${encodeURIComponent(identity.connectorId)}/claim`, {}, signal);
+        if (this.stopped) break;
+        if (rawJob) await processor.process(rawJob, this.settings.printerName, signal); else await this.wait(1_000, signal);
+        failures = 0;
       } catch (error) {
+        if (error instanceof StorageError) throw error;
         if (this.stopped) return;
-        const detail = this.asMessage(error);
         const revoked = error instanceof ConnectorRevokedError;
-        this.setRuntime({ state: revoked ? 'revoked' : 'offline', message: revoked ? 'Connector token was revoked; pair again' : 'Portal connection failed; retrying in 5 seconds', lastError: detail });
-        this.log('portal_error', detail);
-        if (revoked) return;
-        await this.delay(5_000);
+        this.setRuntime({ state: revoked ? 'revoked' : 'offline', message: revoked ? 'Token revoked; pair again' : 'Connection unavailable; retrying', lastError: this.message(error) });
+        this.log(revoked ? 'revoked' : 'portal_error'); if (revoked) return;
+        await this.wait(error instanceof PortalHttpError && error.retryAfterMs !== undefined ? error.retryAfterMs : Math.min(60_000, 1_000 * 2 ** Math.min(++failures, 6)) * (0.8 + Math.random() * 0.2), signal);
       }
     }
   }
-
-  private async recover(credentials: Credentials, journal: Journal): Promise<void> {
-    for (const [jobId, entry] of Object.entries(journal)) {
-      if (entry.state === 'spooled') await this.acknowledge(credentials, jobId, { result: 'spooled' });
-      else if (entry.state === 'printing') await this.acknowledge(credentials, jobId, { result: 'attention', errorCode: 'UNKNOWN_RESULT', errorMessage: 'Connector restarted while print result was unknown' });
-      delete journal[jobId];
-    }
-    this.persist(this.statePath, journal);
+  private async wait(ms: number, signal: AbortSignal): Promise<void> {
+    if (this.options.delay) await this.options.delay(ms); else await abortableDelay(ms, signal);
   }
-
-  private async processClaim(credentials: Credentials, journal: Journal, rawJob: unknown): Promise<void> {
-    let job: PrintJobPayloadV1;
-    try { job = parsePrintJobPayload(rawJob); }
-    catch (error) {
-      const rawId = typeof rawJob === 'object' && rawJob !== null && 'jobId' in rawJob && typeof rawJob.jobId === 'string' ? rawJob.jobId : null;
-      if (!rawId) throw error;
-      const invalidChecksum = this.asMessage(error).includes('CHECKSUM');
-      await this.acknowledge(credentials, rawId, { result: 'error', errorCode: invalidChecksum ? 'INVALID_PAYLOAD_CHECKSUM' : 'INVALID_PAYLOAD', errorMessage: this.asMessage(error) });
-      return;
-    }
-
-    this.setRuntime({ state: 'printing', message: `Processing job ${job.jobId}`, lastJobAt: this.now().toISOString() });
-    journal[job.jobId] = { state: 'leased', updatedAt: Date.now() };
-    this.persist(this.statePath, journal);
-    const renewal = setInterval(() => { void this.request(credentials, `/api/print/connectors/${credentials.connectorId}/jobs/${job.jobId}/renew`, { method: 'POST' }).catch(() => undefined); }, 60_000);
-    try {
-      journal[job.jobId] = { state: 'printing', updatedAt: Date.now() };
-      this.persist(this.statePath, journal);
-      await this.options.printer.print(job, this.settings.printerName);
-      journal[job.jobId] = { state: 'spooled', updatedAt: Date.now() };
-      this.persist(this.statePath, journal);
-      this.log('spooled', job.jobId);
-      await this.acknowledge(credentials, job.jobId, { result: 'spooled' });
-      delete journal[job.jobId];
-      this.persist(this.statePath, journal);
-      this.setRuntime({ state: 'online', message: 'Label sent to system print queue; waiting for jobs' });
-    } catch (error) {
-      if (journal[job.jobId]?.state === 'spooled') throw error;
-      const message = this.asMessage(error);
-      const errorCode = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : 'PRINT_FAILED';
-      this.log('print_error', message);
-      await this.acknowledge(credentials, job.jobId, { result: 'error', errorCode, errorMessage: message });
-      delete journal[job.jobId];
-      this.persist(this.statePath, journal);
-    } finally { clearInterval(renewal); }
-  }
-
-  private acknowledge(credentials: Credentials, jobId: string, body: Record<string, string>): Promise<unknown> {
-    return this.request(credentials, `/api/print/connectors/${credentials.connectorId}/jobs/${jobId}/acknowledge`, { method: 'POST', body: JSON.stringify(body) });
-  }
-
-  private async request(credentials: Credentials, path: string, init: RequestInit = {}): Promise<unknown> {
-    const response = await this.fetchFn(`${this.settings.portalUrl}${path}`, {
-      ...init,
-      signal: init.signal ?? this.abortController.signal,
-      headers: { authorization: `Bearer ${credentials.token}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
-    });
-    if (response.status === 204) return null;
-    const body = await response.json().catch(() => ({})) as unknown;
-    if (response.status === 401) throw new ConnectorRevokedError('Connector token was revoked');
-    if (!response.ok) throw new Error(this.errorMessage(body, `Portal request failed (HTTP ${response.status})`));
-    return body;
-  }
-
-  private errorMessage(body: unknown, fallback: string): string {
-    return typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string' ? body.error : fallback;
-  }
-
-  private asMessage(error: unknown): string { return error instanceof Error ? error.message : 'Unknown error'; }
+  private message(error: unknown): string { return error instanceof Error ? error.message : 'Unknown error'; }
 }

@@ -6,6 +6,7 @@ const HttpPortalUrlSchema = z.string().trim().min(1).transform((value, context) 
   try {
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('protocol');
+    if (url.username || url.password || url.search || url.hash) throw new Error('URL credentials, query, and fragment are not supported');
     return url.toString().replace(/\/$/, '');
   } catch {
     context.addIssue({ code: 'custom', message: 'The portal URL must be a valid HTTP or HTTPS URL' });
@@ -17,6 +18,8 @@ export const EditableSettingsSchema = z.object({
   portalUrl: HttpPortalUrlSchema,
   printerName: z.string().trim().max(255),
   connectorName: z.string().trim().min(1).max(255),
+  allowInsecureHttp: z.boolean().optional(),
+  startAtLogin: z.boolean().optional(),
 });
 export type EditableSettings = z.infer<typeof EditableSettingsSchema>;
 
@@ -25,7 +28,7 @@ export type PairingInput = z.infer<typeof PairingInputSchema>;
 export const PairingResultSchema = z.object({ connectorId: z.string().min(1) }).strict();
 export type PairingResult = z.infer<typeof PairingResultSchema>;
 
-export const ConnectorRuntimeStateSchema = z.enum(['not_paired', 'starting', 'connecting', 'online', 'printing', 'offline', 'revoked', 'error']);
+export const ConnectorRuntimeStateSchema = z.enum(['not_paired', 'starting', 'connecting', 'online', 'printing', 'offline', 'revoked', 'error', 'attention']);
 export type ConnectorRuntimeState = z.infer<typeof ConnectorRuntimeStateSchema>;
 
 export const ConnectorRuntimeSchema = z.object({
@@ -64,6 +67,8 @@ export interface ConnectorApi {
   testPrint(size: z.infer<typeof LabelSizeSchema>): Promise<void>;
   getLogs(): Promise<ActivityLogEntry[]>;
   openPrinterSettings(): Promise<void>;
+  onStatusChanged?(listener: () => void): () => void;
+  diagnostics?(): Promise<string>;
 }
 
 export { LabelSizeSchema };

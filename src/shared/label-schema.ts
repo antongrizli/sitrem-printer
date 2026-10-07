@@ -12,9 +12,9 @@ export type LabelSize = z.infer<typeof LabelSizeSchema>;
 
 export const PrintJobPayloadV1Schema = z.object({
   schemaVersion: z.literal(1),
-  jobId: z.string().min(1),
-  connectorId: z.string().min(1),
-  idempotencyKey: z.string().min(1),
+  jobId: z.string().min(1).max(255).regex(/^[A-Za-z0-9_-]+$/),
+  connectorId: z.string().min(1).max(255).regex(/^[A-Za-z0-9_-]+$/),
+  idempotencyKey: z.string().min(1).max(512),
   html: z.string().min(1).max(1_000_000),
   widthMm: WidthMmSchema,
   heightMm: HeightMmSchema,
