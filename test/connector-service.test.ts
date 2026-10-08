@@ -45,7 +45,7 @@ describe('ConnectorService', () => {
   it.each(['http://localhost:3000', 'https://sitrem.example.test'])('pairs through %s without exposing the token', async (portalUrl) => {
     const fetchFn = vi.fn(async () => response(201, { connectorId: 'paired-1', token: 'machine-secret' }));
     const service = new ConnectorService({ userDataPath: temporaryDirectory(), secureStorage, printer: printer(), version: '1.0.0', os: 'darwin', fetchFn });
-    await expect(service.pair({ portalUrl, connectorName: 'Reception', printerName: 'VRETTI 420B', pairingCode: 'one-time' })).resolves.toEqual({ connectorId: 'paired-1' });
+    await expect(service.pair({ portalUrl, connectorName: 'Reception', printerName: 'VRETTI 420B', selectedMedia: null, pairingCode: 'one-time' })).resolves.toEqual({ connectorId: 'paired-1' });
     expect(fetchFn).toHaveBeenCalledWith(`${portalUrl}/api/print/connectors/pair`, expect.any(Object));
     const status = await service.getStatus();
     expect(status.paired).toBe(true);
@@ -57,6 +57,37 @@ describe('ConnectorService', () => {
     writeFileSync(join(directory, 'connector-settings.json'), JSON.stringify({ portalUrl: 'http://127.0.0.1:3000', connectorName: 'Legacy', printerName: 'VRETTI 420B', pairingCode: '' }));
     const service = new ConnectorService({ userDataPath: directory, secureStorage, printer: printer(), version: '1', os: 'darwin', fetchFn: vi.fn() });
     await expect(service.getStatus()).resolves.toMatchObject({ portalUrl: 'http://127.0.0.1:3000', connectorName: 'Legacy', paired: false });
+  });
+
+  it('persists a selected format and synchronizes it immediately when the portal supports the format endpoint', async () => {
+    const directory = temporaryDirectory();
+    credentials(directory);
+    const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe('http://127.0.0.1:3000/api/print/connectors/connector-1/media');
+      expect(init?.method).toBe('PUT');
+      expect(JSON.parse(String(init?.body))).toEqual({ schemaVersion: 1, clientRevision: 1, expectedServerRevision: null,
+        deviceName: 'VRETTI 420B', media: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 } });
+      return response(200, { clientRevision: 1, serverRevision: 4, isDefaultConnector: true,
+        effectiveMedia: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 } });
+    });
+    const service = new ConnectorService({ userDataPath: directory, secureStorage, printer: printer(), version: '1', os: 'darwin', fetchFn });
+    await service.saveSettings({ portalUrl: 'http://127.0.0.1:3000', connectorName: 'Test Connector', printerName: 'VRETTI 420B',
+      selectedMedia: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 } });
+    await expect(service.getStatus()).resolves.toMatchObject({ selectedMedia: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25 },
+      mediaSync: { clientRevision: 1, serverRevision: 4, state: 'synced' } });
+    expect(JSON.parse(readFileSync(join(directory, 'connector-session.json'), 'utf8'))).toMatchObject({ schemaVersion: 2,
+      settings: { selectedMedia: { formatId: 'stock_70x25' } }, mediaSync: { state: 'synced', serverRevision: 4 } });
+  });
+
+  it('keeps the format locally when an older Board does not provide the format endpoint', async () => {
+    const directory = temporaryDirectory();
+    credentials(directory);
+    const service = new ConnectorService({ userDataPath: directory, secureStorage, printer: printer(), version: '1', os: 'darwin',
+      fetchFn: vi.fn(async () => response(404, { error: 'not found' })) });
+    await service.saveSettings({ portalUrl: 'http://127.0.0.1:3000', connectorName: 'Test Connector', printerName: 'VRETTI 420B',
+      selectedMedia: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 } });
+    await expect(service.getStatus()).resolves.toMatchObject({ selectedMedia: { formatId: 'stock_70x25' },
+      mediaSync: { state: 'unsupported', message: expect.stringContaining('saved locally') } });
   });
 
   it('returns settings and a visible printer error when Electron printer discovery fails', async () => {
@@ -83,13 +114,14 @@ describe('ConnectorService', () => {
     await vi.waitFor(() => expect(calls.some((url) => url.endsWith('/claim'))).toBe(true));
     expect(calls[0]).toContain('/jobs/job-old/acknowledge');
     expect(print).not.toHaveBeenCalled();
-    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toMatchObject({ schemaVersion: 1, entries: [{ state: 'spooled', acknowledged: true }] });
+    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toMatchObject({ schemaVersion: 2, entries: [{ state: 'spooled', acknowledged: true }] });
   });
 
   it('heartbeats, claims, prints, and acknowledges one valid job', async () => {
     const directory = temporaryDirectory();
     credentials(directory);
-    const job = createPayload({ connectorId: 'connector-1', idempotencyKey: 'order-1', html: safeHtml, widthMm: 50, heightMm: 30, orientation: 'portrait', copies: 1 });
+    const portalFixture = JSON.parse(readFileSync(new URL('./fixtures/portal-labels.json', import.meta.url), 'utf8'))[0];
+    const job = createPayload({ ...portalFixture, jobId: 'portal-job', idempotencyKey: 'order-1' });
     let claimed = false;
     let service: ConnectorService;
     const requestBodies: unknown[] = [];
@@ -107,7 +139,7 @@ describe('ConnectorService', () => {
     await vi.waitFor(() => expect(print).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(requestBodies).toContainEqual({ result: 'spooled' }));
     expect(requestBodies).toContainEqual({ version: '1.2.3', os: 'darwin', deviceName: 'VRETTI 420B' });
-    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toMatchObject({ schemaVersion: 1, entries: [{ state: 'spooled', acknowledged: true }] });
+    expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toMatchObject({ schemaVersion: 2, entries: [{ state: 'spooled', acknowledged: true }] });
   });
 
   it('reports invalid claimed HTML instead of printing it', async () => {

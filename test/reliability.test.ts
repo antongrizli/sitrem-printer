@@ -38,7 +38,7 @@ describe('identity and durability', () => {
     writeFileSync(join(path, 'connector-credentials.json'), JSON.stringify({ connectorId: identity.connectorId, token: Buffer.from(identity.token).toString('base64') }));
     const fetchFn = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response('{}', { status: 403 }));
     const service = new ConnectorService({ userDataPath: path, secureStorage, printer: { printers: async () => [], print: async () => {} }, version: '1', os: 'win32', fetchFn });
-    await expect(service.pair({ ...settings, portalUrl: 'https://b.example.test', pairingCode: 'code' })).rejects.toThrow('403');
+    await expect(service.pair({ ...settings, portalUrl: 'https://b.example.test', selectedMedia: null, pairingCode: 'code' })).rejects.toThrow('403');
     expect(await service.getStatus()).toMatchObject({ portalUrl: identity.portalUrl, paired: true });
     expect(fetchFn.mock.calls[0]?.[0]).toContain('b.example.test');
     expect(JSON.stringify(fetchFn.mock.calls)).not.toContain('SECRET-A');
@@ -82,6 +82,18 @@ describe('identity and durability', () => {
     expect(journal.find(identity.portalUrl, identity.connectorId, 'old')).toMatchObject({ state: 'attention', acknowledged: true });
     expect(journal.find('https://other.test', 'other', 'foreign')).toMatchObject({ acknowledged: false });
     expect(print).not.toHaveBeenCalled(); expect(fetchFn).toHaveBeenCalledOnce();
+  });
+  it('migrates v1 receipts to v2 with a backup and duplicate evidence intact', () => {
+    const path = join(temp(), 'journal.json');
+    const previous = { schemaVersion: 1, entries: [{ portalUrl: identity.portalUrl, connectorId: identity.connectorId, jobId: 'saved', state: 'spooled', updatedAt: 1, acknowledged: true }] };
+    writeFileSync(path, JSON.stringify(previous));
+    const journal = new JournalStore(path, identity);
+    expect(journal.all()).toEqual(previous.entries);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ ...previous, schemaVersion: 2 });
+    expect(JSON.parse(readFileSync(path + '.bak', 'utf8'))).toEqual(previous);
+    journal.put({ ...journal.all()[0]!, updatedAt: 2 });
+    journal.put({ ...journal.all()[0]!, updatedAt: 3 });
+    expect(JSON.parse(readFileSync(path + '.v1.bak', 'utf8'))).toEqual(previous);
   });
   it('rejects newer journal schemas rather than starting fresh', () => {
     const path = join(temp(), 'journal.json'); writeFileSync(path, JSON.stringify({ schemaVersion: 99, entries: [] }));

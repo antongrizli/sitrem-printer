@@ -6,10 +6,14 @@ import { App } from '../src/renderer/src/App.tsx';
 import type { ConnectorApi, ConnectorStatus } from '../src/shared/contracts.ts';
 
 const status: ConnectorStatus = {
+  appVersion: '0.1.10',
   portalUrl: 'http://127.0.0.1:3000',
   connectorName: 'Reception',
   printerName: 'VRETTI 420B',
+  selectedMedia: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 },
+  mediaSync: { clientRevision: 1, serverRevision: null, state: 'pending', message: null },
   paired: true,
+  recoveryJobIds: [],
   printers: ['VRETTI 420B', 'Office printer'],
   printerAvailable: true,
   printerError: null,
@@ -36,6 +40,12 @@ beforeEach(() => { window.sitremConnector = mockApi(); });
 afterEach(() => vi.useRealTimers());
 
 describe('React settings renderer', () => {
+  it('keeps unresolved print outcomes visible while the connection is online', async () => {
+    window.sitremConnector = mockApi({ getStatus: vi.fn(async () => ({ ...status, recoveryJobIds: ['uncertain-job'] })) });
+    render(<App />);
+    expect(await screen.findByText(/Saved print outcomes need review/)).toHaveTextContent('uncertain-job');
+    expect(screen.getByText(/Connected to portal/)).toBeInTheDocument();
+  });
   it('loads status, editable settings, printers, and activity', async () => {
     render(<App />);
     expect(await screen.findByDisplayValue('http://127.0.0.1:3000')).toBeInTheDocument();
@@ -83,9 +93,31 @@ describe('React settings renderer', () => {
     await waitFor(() => expect(saveSettings).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: 'Open system printer settings' }));
     await waitFor(() => expect(openPrinterSettings).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByRole('button', { name: 'Print 50 × 30 mm test grid' }));
-    await waitFor(() => expect(testPrint).toHaveBeenCalledWith({ widthMm: 50, heightMm: 30 }));
-    expect(await screen.findByText('Test label sent to the system print queue.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Print 70 × 25 mm test grid' }));
+    await waitFor(() => expect(testPrint).toHaveBeenCalledWith({ widthMm: 70, heightMm: 25 }));
+    expect(await screen.findByText(/Test label accepted by the system spooler/)).toBeInTheDocument();
+  });
+  it('prints the entered stock size and rejects invalid dimensions before IPC', async () => {
+    const testPrint = vi.fn(async () => undefined);
+    window.sitremConnector = mockApi({ testPrint });
+    render(<App />);
+    await screen.findByDisplayValue('Reception');
+    fireEvent.change(screen.getByLabelText('Stock width (mm)'), { target: { value: '60' } });
+    fireEvent.change(screen.getByLabelText('Feed length (mm)'), { target: { value: '40' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Print 60 × 40 mm test grid' }));
+    await waitFor(() => expect(testPrint).toHaveBeenCalledWith({ widthMm: 60, heightMm: 40 }));
+    await screen.findByText(/Test label accepted/);
+    fireEvent.change(screen.getByLabelText('Stock width (mm)'), { target: { value: '10' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Print 10 × 40 mm test grid' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('widthMm must be between 25.4 and 108 mm'));
+    expect(testPrint).toHaveBeenCalledOnce();
+  });
+  it('starts Vretti calibration at the loaded 70 × 25 mm stock and offers driver formats', async () => {
+    render(<App />);
+    await screen.findByDisplayValue('Reception');
+    expect(await screen.findByRole('option', { name: 'Current stock — 70 × 25 mm' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '4 × 6 in' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Print 70 × 25 mm test grid' })).toBeInTheDocument();
   });
 
   it('shows an unavailable selected printer and bridge errors', async () => {

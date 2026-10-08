@@ -27,7 +27,17 @@ export class PrintCoordinator implements PrintEngine {
   }
 }
 
-export class UnsupportedPageSizeError extends Error {
+export class PreSubmissionError extends Error {
+  readonly code = 'PRE_SUBMISSION_FAILED';
+}
+
+/** A callback failure occurs after print() was invoked; it cannot prove no output. */
+export class SubmittedPrintError extends Error {
+  readonly submissionUncertain = true;
+  readonly code: string = 'PRINT_FAILED';
+}
+
+export class UnsupportedPageSizeError extends SubmittedPrintError {
   readonly code = 'UNSUPPORTED_PAGE_SIZE';
 }
 
@@ -55,19 +65,21 @@ export class ElectronPrintEngine implements PrintEngine {
   async print(candidate: PrintJobPayloadV1, deviceName: string): Promise<void> {
     const payload = parsePrintJobPayload(candidate);
     if (!deviceName) throw Object.assign(new Error('Select a system printer in Connector Settings'), { code: 'PRINTER_NOT_SELECTED' });
-    const printers = await this.printers();
+    let printers: SystemPrinter[];
+    try { printers = await this.printers(); } catch { throw new PreSubmissionError('System printer discovery failed. Check the spooler and replace this job.'); }
     if (!printers.some((printer) => printer.name === deviceName)) throw Object.assign(new Error(`Printer not found: ${deviceName}`), { code: 'PRINTER_NOT_FOUND' });
 
     const contents = this.current ?? this.webContents;
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'none\'; style-src \'unsafe-inline\'; img-src data:; font-src data:; base-uri \'none\'; form-action \'none\'">';
-    await this.bounded(contents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent('<!doctype html>' + csp + payload.html.replace(/<!doctype[^>]*>/i, ''))}`));
+    try { await this.bounded(contents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent('<!doctype html>' + csp + payload.html.replace(/<!doctype[^>]*>/i, ''))}`)); }
+    catch { throw new PreSubmissionError('Label could not load before print submission. Restart the Connector and replace this job.'); }
     const result = await this.bounded(new Promise<PrintResult>((resolve) => {
       contents.print({
         silent: true,
         deviceName,
         printBackground: true,
         scaleFactor: 100,
-        landscape: payload.orientation === 'landscape',
+        landscape: false, // Payload HTML owns content rotation; pageSize is physical stock.
         margins: { marginType: 'none' },
         pageSize: { width: Math.round(payload.widthMm * 1000), height: Math.round(payload.heightMm * 1000) },
         copies: payload.copies,
@@ -78,7 +90,7 @@ export class ElectronPrintEngine implements PrintEngine {
 
     if (!result.success) {
       if (/page|size|paper|media/i.test(result.failureReason ?? '')) throw new UnsupportedPageSizeError(result.failureReason || 'Printer driver does not support this page size');
-      throw Object.assign(new Error(result.failureReason || 'OS spooler rejected the job'), { code: 'PRINT_FAILED' });
+      throw new SubmittedPrintError(result.failureReason || 'OS spooler rejected the job');
     }
   }
 }

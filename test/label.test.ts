@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { createPayload, isVrettiDriver, parsePrintJobPayload, validateLabelHtml, validatePhysicalSize } from '../src/shared/label.ts';
+import { createPayload, isVrettiDriver, parsePrintJobPayload, validateLabelHtml, validatePhysicalSize, VRETTI_420B_STOCK_PRESETS } from '../src/shared/label.ts';
 
 const html = '<!doctype html><style>@page { size: 50mm 30mm; margin: 0 } html,body{width:50mm;height:30mm;margin:0}</style><svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>';
 
 describe('label payload validation', () => {
+  it('offers the installed Vretti driver formats and the loaded 70 × 25 mm stock', () => {
+    expect(VRETTI_420B_STOCK_PRESETS).toContainEqual(expect.objectContaining({ name: 'Current stock — 70 × 25 mm', widthMm: 70, heightMm: 25 }));
+    expect(VRETTI_420B_STOCK_PRESETS).toHaveLength(21);
+    expect(new Set(VRETTI_420B_STOCK_PRESETS.map((preset) => preset.id)).size).toBe(21);
+    for (const preset of VRETTI_420B_STOCK_PRESETS) validatePhysicalSize(preset.widthMm, preset.heightMm);
+  });
   it('creates a 50 × 30 payload with a valid checksum', () => {
     const payload = createPayload({ connectorId: 'connector-1', idempotencyKey: 'order-1', html, widthMm: 50, heightMm: 30, orientation: 'portrait', copies: 1 });
     expect(payload.schemaVersion).toBe(1);

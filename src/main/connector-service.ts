@@ -2,7 +2,7 @@ import bwipjs from '@bwip-js/node';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { ActivityLogEntrySchema, ConnectorRuntimeSchema, EditableSettingsSchema, LabelSizeSchema, PairingInputSchema,
-  type ActivityLogEntry, type ConnectorRuntime, type ConnectorStatus, type EditableSettings, type LabelSize, type PairingInput, type PairingResult } from '../shared/contracts.ts';
+  MediaSyncSchema, type ActivityLogEntry, type ConnectorRuntime, type ConnectorStatus, type EditableSettings, type LabelSize, type MediaSync, type PairingInput, type PairingResult } from '../shared/contracts.ts';
 import { createPayload } from '../shared/label.ts';
 import { PrintCoordinator, type PrintEngine } from './print-engine.ts';
 import { abortableDelay, PortalClient, PortalHttpError, ConnectorRevokedError, type SessionIdentity } from './portal-client.ts';
@@ -19,11 +19,17 @@ type Options = {
   fetchFn?: typeof fetch; delay?: (milliseconds: number) => Promise<void>; now?: () => Date; requestTimeoutMs?: number;
 };
 const PairResponse = z.object({ connectorId: z.string().min(1).max(255).regex(/^[A-Za-z0-9_-]+$/), token: z.string().min(1).max(4096) }).strict();
-const StoredSession = z.object({ schemaVersion: z.literal(1), settings: EditableSettingsSchema,
+const StoredSession = z.object({ schemaVersion: z.literal(2), settings: EditableSettingsSchema,
+  mediaSync: MediaSyncSchema,
   connectorId: z.string().min(1), token: z.string().min(1) }).strict();
+const PreviousStoredSession = z.object({ schemaVersion: z.literal(1), settings: EditableSettingsSchema,
+  connectorId: z.string().min(1), token: z.string().min(1) }).strict();
+const MediaSyncResponse = z.object({ clientRevision: z.number().int().nonnegative(), serverRevision: z.number().int().nonnegative(),
+  isDefaultConnector: z.boolean(), effectiveMedia: z.object({ formatId: z.string(), widthMm: z.number(), heightMm: z.number(), catalogVersion: z.literal(1) }).nullable() }).strict();
 
 export class ConnectorService {
   private settings: EditableSettings;
+  private mediaSync: MediaSync = { clientRevision: 0, serverRevision: null, state: 'not_selected', message: null };
   private identity: SessionIdentity | null = null;
   private journal: JournalStore | undefined;
   private runtime: ConnectorRuntime = { state: 'not_paired', message: 'Not paired', lastHeartbeatAt: null, lastError: null, lastJobAt: null };
@@ -51,9 +57,22 @@ export class ConnectorService {
     try {
       const session = readJson(this.sessionPath);
       if (session !== undefined) {
-        const record = StoredSession.parse(session);
-        this.settings = record.settings;
-        this.identity = this.decrypt(record.connectorId, record.token, record.settings.portalUrl);
+        const current = StoredSession.safeParse(session);
+        const previous = PreviousStoredSession.safeParse(session);
+        if (!current.success && !previous.success) throw new StorageError('Connector session schema is invalid or newer than this app. Preserve this file and upgrade the Connector.');
+        if (current.success) {
+          this.settings = current.data.settings;
+          this.mediaSync = current.data.mediaSync;
+          this.identity = this.decrypt(current.data.connectorId, current.data.token, current.data.settings.portalUrl);
+        } else {
+          const legacy = previous.data;
+          if (!legacy) throw new StorageError('Connector session schema is invalid or newer than this app. Preserve this file and upgrade the Connector.');
+          this.settings = legacy.settings;
+          this.mediaSync = { clientRevision: 0, serverRevision: null,
+            state: legacy.settings.selectedMedia ? 'pending' : 'not_selected', message: null };
+          this.identity = this.decrypt(legacy.connectorId, legacy.token, legacy.settings.portalUrl);
+          this.commitSession(this.settings, this.identity);
+        }
       } else {
         const legacySettings = readJson(join(options.userDataPath, 'connector-settings.json'));
         if (legacySettings !== undefined) this.settings = EditableSettingsSchema.parse(legacySettings);
@@ -79,7 +98,7 @@ export class ConnectorService {
   }
   private commitSession(settings: EditableSettings, identity: SessionIdentity): void {
     if (!this.options.secureStorage.isEncryptionAvailable()) throw new StorageError('OS secure credential storage unavailable');
-    writeJson(this.sessionPath, { schemaVersion: 1, settings, connectorId: identity.connectorId,
+    writeJson(this.sessionPath, { schemaVersion: 2, settings, mediaSync: this.mediaSync, connectorId: identity.connectorId,
       token: this.options.secureStorage.encryptString(identity.token).toString('base64') });
   }
   private log(event: string, detail = ''): void {
@@ -100,16 +119,18 @@ export class ConnectorService {
       await this.discoveryPromise;
     }
     const printers = this.discovery?.printers ?? [];
-    return { ...this.settings, paired: !!this.identity, printers, printerAvailable: !!this.settings.printerName && printers.includes(this.settings.printerName),
-      printerError: this.discovery?.error ?? null, ...this.runtime };
+    return { ...this.settings, appVersion: this.options.version, mediaSync: this.mediaSync, paired: !!this.identity, printers, printerAvailable: !!this.settings.printerName && printers.includes(this.settings.printerName),
+      printerError: this.discovery?.error ?? null, recoveryJobIds: (this.journal?.all() ?? [])
+        .filter((r) => r.portalUrl === this.identity?.portalUrl && r.connectorId === this.identity?.connectorId && (r.reconciliationRequired || r.state === 'attention'))
+        .map((r) => r.jobId), ...this.runtime };
   }
   invalidatePrinters(): void { this.discovery = undefined; }
   getLogs(): ActivityLogEntry[] { return structuredClone(this.logs); }
   getTraySnapshot() { return { ...this.runtime, printerName: this.settings.printerName }; }
   diagnostics(): string {
     return JSON.stringify({ version: this.options.version, os: this.options.os, architecture: process.arch, state: this.runtime.state,
-      printerName: this.settings.printerName, recovery: (this.journal?.all() ?? []).filter((r) => !r.acknowledged || r.state === 'attention')
-        .map((r) => ({ jobId: r.jobId, state: r.state, pending: !r.acknowledged, currentSession: r.portalUrl === this.identity?.portalUrl && r.connectorId === this.identity?.connectorId })),
+      printerName: this.settings.printerName, selectedMedia: this.settings.selectedMedia, mediaSync: this.mediaSync, recovery: (this.journal?.all() ?? []).filter((r) => !r.acknowledged || r.state === 'attention')
+        .map((r) => ({ jobId: r.jobId, state: r.state, pending: !r.acknowledged, errorCode: r.acknowledgement?.errorCode ?? null, reconciliationRequired: r.reconciliationRequired ?? false, currentSession: r.portalUrl === this.identity?.portalUrl && r.connectorId === this.identity?.connectorId })),
       events: this.logs.map(({ at, event }) => ({ at, event })) }, null, 2);
   }
   private healthy(): void { if (this.storageFailure) throw new StorageError(this.storageFailure); }
@@ -133,19 +154,25 @@ export class ConnectorService {
       if (!response.ok) throw new Error(`Pairing failed (HTTP ${response.status})`);
       const credentials = PairResponse.parse(await response.json());
       const identity = Object.freeze({ ...credentials, portalUrl: settings.portalUrl });
-      this.commitSession(settings, identity);
+      this.mediaSync = { clientRevision: settings.selectedMedia ? 1 : 0, serverRevision: null, state: settings.selectedMedia ? 'pending' : 'not_selected', message: null };
       this.settings = settings; this.identity = identity;
+      this.commitSession(settings, identity);
+      if (settings.selectedMedia) await this.syncMedia(new PortalClient(identity, this.fetchFn, this.options.requestTimeoutMs));
       this.log('paired', credentials.connectorId);
       this.setRuntime({ state: 'starting', message: 'Paired; ready to start', lastError: null });
       return { connectorId: credentials.connectorId };
     } finally { this.pairing = false; if (wasRunning) this.start(); }
   }
-  saveSettings(candidate: EditableSettings): void {
+  async saveSettings(candidate: EditableSettings): Promise<void> {
     this.healthy(); if (this.pairing) throw new Error('Wait for pairing to finish');
     const next = EditableSettingsSchema.parse(candidate); this.transport(next);
     if (this.identity && next.portalUrl !== this.identity.portalUrl) throw new Error('Changing the portal URL requires pairing again with a new pairing code.');
+    const mediaChanged = JSON.stringify(next.selectedMedia) !== JSON.stringify(this.settings.selectedMedia) || next.printerName !== this.settings.printerName;
+    if (mediaChanged) this.mediaSync = { ...this.mediaSync, clientRevision: this.mediaSync.clientRevision + 1,
+      state: next.selectedMedia ? 'pending' : 'not_selected', message: null };
     if (this.identity) this.commitSession(next, this.identity); else writeJson(join(this.options.userDataPath, 'connector-settings.json'), next);
     this.settings = next; this.invalidatePrinters(); this.setRuntime({});
+    if (this.identity && this.settings.selectedMedia) await this.syncMedia(new PortalClient(this.identity, this.fetchFn, this.options.requestTimeoutMs));
   }
   start(): void {
     if (this.loopPromise || this.pairing || this.storageFailure) return;
@@ -169,6 +196,26 @@ export class ConnectorService {
     await this.printer.print(createPayload({ connectorId: 'local-test', idempotencyKey: `test-${this.now().getTime()}`, html, ...size, orientation: 'portrait', copies: 1 }), printerName);
     this.log('test_label_spooled');
   }
+  private async syncMedia(client: PortalClient, signal?: AbortSignal): Promise<void> {
+    const media = this.settings.selectedMedia;
+    if (!media || !this.identity) return;
+    try {
+      const raw = await client.request(`/api/print/connectors/${encodeURIComponent(this.identity.connectorId)}/media`, {
+        method: 'PUT', body: JSON.stringify({ schemaVersion: 1, clientRevision: this.mediaSync.clientRevision,
+          expectedServerRevision: this.mediaSync.serverRevision, deviceName: this.settings.printerName, media }),
+      }, signal);
+      const response = MediaSyncResponse.parse(raw);
+      if (response.clientRevision !== this.mediaSync.clientRevision) throw new Error('Portal acknowledged a different media revision');
+      this.mediaSync = { clientRevision: this.mediaSync.clientRevision, serverRevision: response.serverRevision, state: 'synced',
+        message: response.isDefaultConnector ? `Synced — Board default ${media.widthMm} × ${media.heightMm} mm` : 'Synced — another Connector is Board default' };
+      this.commitSession(this.settings, this.identity); this.log('media_synced', media.formatId); this.setRuntime({});
+    } catch (error) {
+      const unsupported = error instanceof PortalHttpError && [404, 405, 501].includes(error.status);
+      this.mediaSync = { ...this.mediaSync, state: unsupported ? 'unsupported' : 'pending',
+        message: unsupported ? 'Portal does not support label-format sync yet; selection is saved locally.' : 'Format saved locally; waiting to sync with the portal.' };
+      this.commitSession(this.settings, this.identity); this.log(unsupported ? 'media_sync_unsupported' : 'media_sync_pending', media.formatId); this.setRuntime({});
+    }
+  }
   private async run(identity: SessionIdentity): Promise<void> {
     const client = new PortalClient(identity, this.fetchFn, this.options.requestTimeoutMs);
     const signal = this.abortController.signal;
@@ -183,6 +230,7 @@ export class ConnectorService {
             method: 'POST', body: JSON.stringify({ version: this.options.version, os: this.options.os, deviceName: this.settings.printerName }),
           }, signal);
           this.setRuntime({ state: 'online', message: 'Connected; waiting for print jobs', lastHeartbeatAt: this.now().toISOString(), lastError: null });
+          if (this.settings.selectedMedia && this.mediaSync.state !== 'synced') await this.syncMedia(client, signal);
           heartbeatAt = this.now().getTime() + 30_000;
         }
         const rawJob = await client.request(`/api/print/connectors/${encodeURIComponent(identity.connectorId)}/claim`, {}, signal);

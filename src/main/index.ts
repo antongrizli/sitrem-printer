@@ -109,7 +109,10 @@ function registerIpcHandlers(): void {
     await service!.restart();
     return result;
   });
-  handle(IPC_CHANNELS.saveSettings, (_event, input: EditableSettings) => { service!.saveSettings(input); app.setLoginItemSettings({ openAtLogin: input.startAtLogin ?? false }); });
+  handle(IPC_CHANNELS.saveSettings, async (_event, input: EditableSettings) => {
+    await service!.saveSettings(input);
+    app.setLoginItemSettings({ openAtLogin: input.startAtLogin ?? false });
+  });
   handle(IPC_CHANNELS.testPrint, (_event, size: LabelSize) => service!.testPrint(size));
   handle(IPC_CHANNELS.getLogs, () => service!.getLogs());
   handle('connector:diagnostics', () => service!.diagnostics());

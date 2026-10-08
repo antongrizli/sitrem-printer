@@ -1,10 +1,11 @@
 import { type FormEvent, useEffect, useState } from 'react';
-import type { ActivityLogEntry, EditableSettings } from '../../shared/contracts.ts';
+import { LabelSizeSchema, type ActivityLogEntry, type EditableSettings } from '../../shared/contracts.ts';
+import { VRETTI_420B_STOCK_PRESETS } from '../../shared/vretti-420b.ts';
 import { ActivityLog, CalibrationInstructions, ConnectionStatus, PrinterStatus } from './components.tsx';
 import { useConnectorStatus } from './useConnectorStatus.ts';
 
 type FormState = EditableSettings & { pairingCode: string };
-const emptyForm: FormState = { portalUrl: '', connectorName: '', printerName: '', pairingCode: '' };
+const emptyForm: FormState = { portalUrl: '', connectorName: '', printerName: '', selectedMedia: null, pairingCode: '' };
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Unable to complete the operation.';
 
 export function App() {
@@ -18,7 +19,7 @@ export function App() {
 
   useEffect(() => {
     if (!status || formInitialized) return;
-    setForm({ portalUrl: status.portalUrl, connectorName: status.connectorName, printerName: status.printerName, allowInsecureHttp: status.allowInsecureHttp, startAtLogin: status.startAtLogin, pairingCode: '' });
+    setForm({ portalUrl: status.portalUrl, connectorName: status.connectorName, printerName: status.printerName, selectedMedia: status.selectedMedia, allowInsecureHttp: status.allowInsecureHttp, startAtLogin: status.startAtLogin, pairingCode: '' });
     setFormInitialized(true);
   }, [status, formInitialized]);
 
@@ -44,7 +45,7 @@ export function App() {
         setSuccess('Settings saved.');
       }
       const next = await refresh();
-      setForm({ portalUrl: next.portalUrl, connectorName: next.connectorName, printerName: next.printerName, allowInsecureHttp: next.allowInsecureHttp, startAtLogin: next.startAtLogin, pairingCode: '' });
+      setForm({ portalUrl: next.portalUrl, connectorName: next.connectorName, printerName: next.printerName, selectedMedia: next.selectedMedia, allowInsecureHttp: next.allowInsecureHttp, startAtLogin: next.startAtLogin, pairingCode: '' });
       await reloadLogs();
     } catch (caught) { setError(errorMessage(caught)); }
     finally { setBusy(false); }
@@ -53,8 +54,10 @@ export function App() {
   const testPrint = async () => {
     setBusy(true); setError(''); setSuccess('');
     try {
-      await window.sitremConnector.testPrint({ widthMm: 50, heightMm: 30 });
-      setSuccess('Test label sent to the system print queue.');
+      const size = LabelSizeSchema.safeParse(form.selectedMedia && { widthMm: form.selectedMedia.widthMm, heightMm: form.selectedMedia.heightMm });
+      if (!size.success) throw new Error(size.error.issues[0]?.message ?? 'Select the loaded stock and save settings before printing a calibration label.');
+      await window.sitremConnector.testPrint(size.data);
+      setSuccess('Test label accepted by the system spooler. Check physical output and scan the barcode.');
       await reloadLogs();
     } catch (caught) { setError(errorMessage(caught)); }
     finally { setBusy(false); }
@@ -68,12 +71,21 @@ export function App() {
 
   const printers = status?.printers ?? [];
   const printerOptions = form.printerName && !printers.includes(form.printerName) ? [form.printerName, ...printers] : printers;
+  const selectedMedia = form.selectedMedia;
+  const selectedTestPreset = selectedMedia && VRETTI_420B_STOCK_PRESETS.some((preset) => preset.id === selectedMedia.formatId && preset.widthMm === selectedMedia.widthMm && preset.heightMm === selectedMedia.heightMm)
+    ? selectedMedia.formatId : selectedMedia ? 'custom' : '';
+  const setMedia = (formatId: string, widthMm: number, heightMm: number) => setForm((current) => ({ ...current, selectedMedia: { formatId, widthMm, heightMm, catalogVersion: 1 } }));
 
   return (
     <main className="wrap">
       <h1>Printer Connector</h1>
+      {status?.appVersion && <p className="hint">Version {status.appVersion}</p>}
       <p>Pair this computer with your portal and choose the system printer that receives labels.</p>
       <ConnectionStatus status={status} />
+      {status?.mediaSync.message && <div className={status.mediaSync.state === 'synced' ? 'success' : 'error'} role="status">{status.mediaSync.message}</div>}
+      {!!status?.recoveryJobIds.length && <div role="alert" className="error">
+        Saved print outcomes need review in the portal. Check physical output before replacing these jobs: {status.recoveryJobIds.join(', ')}.
+      </div>}
       <form onSubmit={submit}>
         <label className="field" htmlFor="portalUrl">Portal URL</label>
         <input id="portalUrl" type="url" value={form.portalUrl} onChange={(event) => update('portalUrl', event.target.value)} placeholder="http://localhost:3000 or https://sitrem.example.com" required />
@@ -96,7 +108,24 @@ export function App() {
         <p className="hint">The pairing code is used once and is never stored. Leave it blank after pairing to save portal and printer settings.</p>
 
         <button id="submit" type="submit" disabled={busy || !formInitialized}>{status?.paired ? 'Save settings' : 'Connect'}</button>
-        <button className="secondary" type="button" disabled={busy} onClick={() => { void testPrint(); }}>Print 50 × 30 mm test grid</button>
+        <fieldset>
+          <legend>Calibration stock</legend>
+          <label className="field" htmlFor="testPreset">Loaded label format</label>
+          <select id="testPreset" value={selectedTestPreset} onChange={(event) => {
+            const preset = VRETTI_420B_STOCK_PRESETS.find((candidate) => candidate.id === event.target.value);
+            if (preset) setMedia(preset.id, preset.widthMm, preset.heightMm);
+          }}>
+            <option value="">Select loaded stock</option>
+            {VRETTI_420B_STOCK_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+            <option value="custom">Custom dimensions below</option>
+          </select>
+          <label className="field" htmlFor="testWidth">Stock width (mm)</label>
+          <input id="testWidth" type="number" min="25.4" max="108" step="0.1" value={selectedMedia?.widthMm ?? ''} onChange={(event) => setMedia('custom', Number(event.target.value), selectedMedia?.heightMm ?? 25)} />
+          <label className="field" htmlFor="testHeight">Feed length (mm)</label>
+          <input id="testHeight" type="number" min="10" max="1778" step="0.1" value={selectedMedia?.heightMm ?? ''} onChange={(event) => setMedia('custom', selectedMedia?.widthMm ?? 25.4, Number(event.target.value))} />
+          <p className="hint">Save after selecting the loaded stock. The Connector then keeps it locally and synchronizes it to a compatible Board portal.</p>
+          <button className="secondary" type="button" disabled={busy || !selectedMedia} onClick={() => { void testPrint(); }}>Print {selectedMedia ? `${selectedMedia.widthMm} × ${selectedMedia.heightMm}` : ''} mm test grid</button>
+        </fieldset>
         <div className="success" aria-live="polite">{success}</div>
         <div className="error" role="alert">{error || loadError}</div>
       </form>

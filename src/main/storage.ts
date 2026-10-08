@@ -53,9 +53,11 @@ export const ReceiptSchema = z.object({
   updatedAt: z.number(),
   acknowledgement: z.record(z.string(), z.string()).optional(),
   acknowledged: z.boolean().default(false),
+  reconciliationRequired: z.boolean().optional(),
 }).strict();
 export type Receipt = z.infer<typeof ReceiptSchema>;
-const JournalDocument = z.object({ schemaVersion: z.literal(1), entries: z.array(ReceiptSchema) }).strict();
+const JournalDocument = z.object({ schemaVersion: z.literal(2), entries: z.array(ReceiptSchema) }).strict();
+const PreviousJournalDocument = z.object({ schemaVersion: z.literal(1), entries: z.array(ReceiptSchema) }).strict();
 const LegacyJournal = z.record(z.string(), z.object({ state: z.enum(['leased', 'printing', 'spooled']), updatedAt: z.number() }).strict());
 
 export class JournalStore {
@@ -65,6 +67,13 @@ export class JournalStore {
     if (raw === undefined) { this.entries = []; return; }
     const current = JournalDocument.safeParse(raw);
     if (current.success) { this.entries = current.data.entries; return; }
+    const previous = PreviousJournalDocument.safeParse(raw);
+    if (previous.success) {
+      // Keep the pre-migration snapshot even after rolling .bak files advance.
+      const migrationBackup = `${path}.v1.bak`;
+      if (!existsSync(migrationBackup)) writeJson(migrationBackup, raw);
+      this.entries = previous.data.entries; this.flush(); return;
+    }
     const legacy = LegacyJournal.safeParse(raw);
     if (!legacy.success) throw new StorageError('Print journal schema is invalid or newer than this app. Printing is blocked; preserve the journal for recovery.');
     this.entries = Object.entries(legacy.data).map(([jobId, entry]) => ({ ...identity, jobId, ...entry, acknowledged: false }));
@@ -83,8 +92,8 @@ export class JournalStore {
       if (next.length >= 10_000) throw new StorageError('Receipt capacity reached. Printing paused; arrange verified receipt archival with the portal operator.');
       next.push(parsed);
     } else next[index] = parsed;
-    writeJson(this.path, { schemaVersion: 1, entries: next });
+    writeJson(this.path, { schemaVersion: 2, entries: next });
     this.entries = next;
   }
-  private flush(): void { writeJson(this.path, { schemaVersion: 1, entries: this.entries }); }
+  private flush(): void { writeJson(this.path, { schemaVersion: 2, entries: this.entries }); }
 }

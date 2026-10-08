@@ -1,6 +1,6 @@
 {
   "name": "sitrem-printer",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Secure SITREM desktop connector for system label printers",
   "author": "SITREM",
   "private": true,
@@ -21,28 +21,29 @@
     "run:local": "npm start"
   },
   "devDependencies": {
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/css-tree": "^3.2.0",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.2.0",
-    "electron": "^44.6.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^44.7.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
-    "jsdom": "^29.1.1",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
+    "jsdom": "^30.1.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "typescript": "^7.0.2",
-    "vite": "^7.3.6",
-    "vitest": "^4.1.10"
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
   },
   "dependencies": {
-    "@bwip-js/node": "^4.11.2",
+    "@bwip-js/node": "^4.11.4",
     "css-tree": "^3.2.1",
     "parse5": "^8.0.1",
-    "zod": "^4.4.3"
+    "zod": "^4.6.5"
   },
   "build": {
     "appId": "com.sitrem.printer",

@@ -3,6 +3,7 @@ import { LabelSizeSchema, PrintJobPayloadV1Schema, type PrintJobPayloadV1 } from
 import { validateStructuredLabel } from './label-security.ts';
 
 export * from './label-schema.ts';
+export { VRETTI_420B_STOCK_PRESETS } from './vretti-420b.ts';
 
 export const LABEL_PRESETS = [
   { name: 'Компактная', widthMm: 40, heightMm: 30 },
@@ -18,6 +19,7 @@ export const LABEL_PRESETS = [
   { name: 'Транспортная', widthMm: 100, heightMm: 150 },
   { name: 'Shipping 4 × 6 in', widthMm: 101.6, heightMm: 152.4 },
 ] as const;
+
 
 export function validatePhysicalSize(widthMm: number, heightMm: number): void {
   LabelSizeSchema.parse({ widthMm, heightMm });

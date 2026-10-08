@@ -9,8 +9,8 @@ describe('typed preload API', () => {
     expect(Object.keys(api).sort()).toEqual(['getLogs', 'getStatus', 'openPrinterSettings', 'pair', 'saveSettings', 'testPrint']);
 
     await api.getStatus();
-    await api.pair({ portalUrl: 'http://localhost:3000', connectorName: 'Connector', printerName: 'Printer', pairingCode: 'code' });
-    await api.saveSettings({ portalUrl: 'http://localhost:3000', connectorName: 'Connector', printerName: 'Printer' });
+    await api.pair({ portalUrl: 'http://localhost:3000', connectorName: 'Connector', printerName: 'Printer', selectedMedia: null, pairingCode: 'code' });
+    await api.saveSettings({ portalUrl: 'http://localhost:3000', connectorName: 'Connector', printerName: 'Printer', selectedMedia: null });
     await api.testPrint({ widthMm: 50, heightMm: 30 });
     await api.getLogs();
     await api.openPrinterSettings();
