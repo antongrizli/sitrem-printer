@@ -108,17 +108,19 @@ jobs:
       - name: Native packaged application smoke test
         run: node scripts/smoke-package.mjs ${{ matrix.arch }}
 
-      - name: Verify production signature
-        if: inputs.production
-        shell: bash
+      - name: Verify macOS production signature
+        if: inputs.production && matrix.platform == 'macos'
         run: |
-          if [ "${{ matrix.platform }}" = "macos" ]; then
-            codesign --verify --deep --strict dist/mac*/SitremPrinter.app
-            xcrun stapler validate dist/mac*/SitremPrinter.app
-            spctl --assess --type execute dist/mac*/SitremPrinter.app
-          else
-            pwsh -NoProfile -Command '$signature = Get-AuthenticodeSignature (Get-ChildItem dist/*.exe).FullName; if ($signature.Status -ne "Valid") { throw "Installer signature is invalid" }'
-          fi
+          codesign --verify --deep --strict dist/mac*/SitremPrinter.app
+          xcrun stapler validate dist/mac*/SitremPrinter.app
+          spctl --assess --type execute dist/mac*/SitremPrinter.app
+
+      - name: Verify Windows production signature
+        if: inputs.production && matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature (Get-ChildItem dist/*.exe).FullName
+          if ($signature.Status -ne "Valid") { throw "Installer signature is invalid" }
 
       - name: Verify installer inventory and hashes
         run: node scripts/verify-artifacts.mjs ${{ matrix.platform }} ${{ matrix.arch }}
