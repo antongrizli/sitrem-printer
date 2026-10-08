@@ -18,7 +18,11 @@ type Options = {
   userDataPath: string; secureStorage: SecureStorage; printer: PrintEngine; version: string; os: string;
   fetchFn?: typeof fetch; delay?: (milliseconds: number) => Promise<void>; now?: () => Date; requestTimeoutMs?: number;
 };
-const PairResponse = z.object({ connectorId: z.string().min(1).max(255).regex(/^[A-Za-z0-9_-]+$/), token: z.string().min(1).max(4096) }).strict();
+const PairResponse = z.object({
+  connectorId: z.string().min(1).max(255).regex(/^[A-Za-z0-9_-]+$/),
+  token: z.string().min(1).max(4096),
+  mediaSyncVersion: z.number().int().nullable().optional(),
+}).passthrough();
 const StoredSession = z.object({ schemaVersion: z.literal(2), settings: EditableSettingsSchema,
   mediaSync: MediaSyncSchema,
   connectorId: z.string().min(1), token: z.string().min(1) }).strict();

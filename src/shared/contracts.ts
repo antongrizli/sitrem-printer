@@ -37,7 +37,10 @@ export const MediaSyncSchema = z.object({
 }).strict();
 export type MediaSync = z.infer<typeof MediaSyncSchema>;
 
-export const PairingInputSchema = EditableSettingsSchema.extend({ pairingCode: z.string().trim().min(1).max(512) }).strict();
+export const PairingInputSchema = EditableSettingsSchema.extend({
+  pairingCode: z.string().trim().min(1).max(512),
+  mediaSyncVersion: z.number().int().nullable().optional(),
+}).passthrough();
 export type PairingInput = z.infer<typeof PairingInputSchema>;
 export const PairingResultSchema = z.object({ connectorId: z.string().min(1) }).strict();
 export type PairingResult = z.infer<typeof PairingResultSchema>;

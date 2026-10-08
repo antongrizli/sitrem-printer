@@ -52,6 +52,22 @@ describe('ConnectorService', () => {
     expect(JSON.stringify(status)).not.toContain('machine-secret');
   });
 
+  it('pairs successfully when portal response includes mediaSyncVersion', async () => {
+    const fetchFn = vi.fn(async () => response(201, { connectorId: 'paired-sync-1', token: 'machine-secret', mediaSyncVersion: 1 }));
+    const service = new ConnectorService({ userDataPath: temporaryDirectory(), secureStorage, printer: printer(), version: '1.0.0', os: 'darwin', fetchFn });
+    await expect(service.pair({ portalUrl: 'https://sitrem.example.test', connectorName: 'Reception', printerName: 'VRETTI 420B', selectedMedia: null, pairingCode: 'one-time' })).resolves.toEqual({ connectorId: 'paired-sync-1' });
+    const status = await service.getStatus();
+    expect(status.paired).toBe(true);
+  });
+
+  it('pairs successfully when pairing input includes mediaSyncVersion', async () => {
+    const fetchFn = vi.fn(async () => response(201, { connectorId: 'paired-sync-2', token: 'machine-secret' }));
+    const service = new ConnectorService({ userDataPath: temporaryDirectory(), secureStorage, printer: printer(), version: '1.0.0', os: 'darwin', fetchFn });
+    await expect(service.pair({ portalUrl: 'https://sitrem.example.test', connectorName: 'Reception', printerName: 'VRETTI 420B', selectedMedia: null, pairingCode: 'one-time', mediaSyncVersion: 1 } as any)).resolves.toEqual({ connectorId: 'paired-sync-2' });
+    const status = await service.getStatus();
+    expect(status.paired).toBe(true);
+  });
+
   it('preserves compatible settings files while stripping legacy pairingCode fields', async () => {
     const directory = temporaryDirectory();
     writeFileSync(join(directory, 'connector-settings.json'), JSON.stringify({ portalUrl: 'http://127.0.0.1:3000', connectorName: 'Legacy', printerName: 'VRETTI 420B', pairingCode: '' }));
