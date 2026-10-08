@@ -45,6 +45,11 @@
     "parse5": "^8.0.1",
     "zod": "^4.6.5"
   },
+  "overrides": {
+    "electron-vite": {
+      "vite": "$vite"
+    }
+  },
   "build": {
     "appId": "com.sitrem.printer",
     "productName": "SitremPrinter",
