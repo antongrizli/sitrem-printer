@@ -6,7 +6,7 @@ export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin({ include: ['electron'] })],
     ssr: {
-      external: ['electron'],
+      external: ['electron', '@bwip-js/node', 'css-tree', 'parse5', 'zod'],
     },
     build: { rollupOptions: { input: resolve('src/main/index.ts') } },
   },
