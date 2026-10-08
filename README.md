@@ -57,7 +57,7 @@ fails validation before packaging. Successful tag builds attach all four
 installers, blockmaps, and SHA-256 provenance manifests to a release with
 generated notes. Each native packaging job launches the unpacked application
 and verifies the settings IPC bridge and print-renderer isolation. PRs and
-`main` pushes run lightweight validation rather than installer builds.
+all repository pushes run lightweight validation rather than installer builds.
 
 Use `./scripts/bump-version.sh major`, `minor`, or `patch` to update the npm
 version and lockfile without committing or tagging. Commit its changes, then
