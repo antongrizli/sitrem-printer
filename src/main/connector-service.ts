@@ -28,10 +28,13 @@ const StoredSession = z.object({ schemaVersion: z.literal(2), settings: Editable
   connectorId: z.string().min(1), token: z.string().min(1) }).strict();
 const PreviousStoredSession = z.object({ schemaVersion: z.literal(1), settings: EditableSettingsSchema,
   connectorId: z.string().min(1), token: z.string().min(1) }).strict();
+const MediaSelection = EditableSettingsSchema.shape.selectedMedia;
 const MediaSyncResponse = z.object({ clientRevision: z.number().int().nonnegative(), serverRevision: z.number().int().nonnegative(),
-  isDefaultConnector: z.boolean(), effectiveMedia: z.object({ formatId: z.string(), widthMm: z.number(), heightMm: z.number(), catalogVersion: z.literal(1) }).nullable() }).strict();
+  isDefaultConnector: z.boolean(), media: MediaSelection.optional(), effectiveMedia: MediaSelection.optional(),
+}).passthrough().transform(value => ({ ...value, media: value.media === undefined ? value.effectiveMedia ?? null : value.media }));
 
 export class ConnectorService {
+  private mediaWork: Promise<void> = Promise.resolve();
   private settings: EditableSettings;
   private mediaSync: MediaSync = { clientRevision: 0, serverRevision: null, state: 'not_selected', message: null };
   private identity: SessionIdentity | null = null;
@@ -169,6 +172,7 @@ export class ConnectorService {
   }
   async saveSettings(candidate: EditableSettings): Promise<void> {
     this.healthy(); if (this.pairing) throw new Error('Wait for pairing to finish');
+    await this.mediaWork;
     const next = EditableSettingsSchema.parse(candidate); this.transport(next);
     if (this.identity && next.portalUrl !== this.identity.portalUrl) throw new Error('Changing the portal URL requires pairing again with a new pairing code.');
     const mediaChanged = JSON.stringify(next.selectedMedia) !== JSON.stringify(this.settings.selectedMedia) || next.printerName !== this.settings.printerName;
@@ -200,25 +204,56 @@ export class ConnectorService {
     await this.printer.print(createPayload({ connectorId: 'local-test', idempotencyKey: `test-${this.now().getTime()}`, html, ...size, orientation: 'portrait', copies: 1 }), printerName);
     this.log('test_label_spooled');
   }
-  private async syncMedia(client: PortalClient, signal?: AbortSignal): Promise<void> {
-    const media = this.settings.selectedMedia;
-    if (!media || !this.identity) return;
+  private syncMedia(client: PortalClient, signal?: AbortSignal): Promise<void> {
+    this.mediaWork = this.mediaWork.then(() => this.performMediaSync(client, signal));
+    return this.mediaWork;
+  }
+  private async performMediaSync(client: PortalClient, signal?: AbortSignal): Promise<void> {
+    if (!this.identity || signal?.aborted) return;
+    if (['conflict', 'error', 'unsupported'].includes(this.mediaSync.state)) return;
+    const path = `/api/print/connectors/${encodeURIComponent(this.identity.connectorId)}/media`;
     try {
-      const raw = await client.request(`/api/print/connectors/${encodeURIComponent(this.identity.connectorId)}/media`, {
-        method: 'PUT', body: JSON.stringify({ schemaVersion: 1, clientRevision: this.mediaSync.clientRevision,
-          expectedServerRevision: this.mediaSync.serverRevision, deviceName: this.settings.printerName, media }),
-      }, signal);
-      const response = MediaSyncResponse.parse(raw);
-      if (response.clientRevision !== this.mediaSync.clientRevision) throw new Error('Portal acknowledged a different media revision');
-      this.mediaSync = { clientRevision: this.mediaSync.clientRevision, serverRevision: response.serverRevision, state: 'synced',
-        message: response.isDefaultConnector ? `Synced — Board default ${media.widthMm} × ${media.heightMm} mm` : 'Synced — another Connector is Board default' };
-      this.commitSession(this.settings, this.identity); this.log('media_synced', media.formatId); this.setRuntime({});
+      const current = MediaSyncResponse.parse(await client.request(path, {}, signal));
+      const changedRemotely = current.serverRevision !== (this.mediaSync.serverRevision ?? 0);
+      const localPending = this.mediaSync.state === 'pending';
+      const differs = JSON.stringify(current.media) !== JSON.stringify(this.settings.selectedMedia);
+      if (localPending && changedRemotely && differs) {
+        this.mediaSync = { ...this.mediaSync, state: 'conflict', message: 'Format conflict: the portal and this computer changed the format. Choose which format to keep.' };
+      } else if (localPending && this.settings.selectedMedia) {
+        const revision = Math.max(this.mediaSync.clientRevision, current.clientRevision + 1, 1);
+        const response = MediaSyncResponse.parse(await client.request(path, { method: 'PUT', body: JSON.stringify({ schemaVersion: 1,
+          clientRevision: revision, expectedServerRevision: current.serverRevision, deviceName: this.settings.printerName, media: this.settings.selectedMedia }) }, signal));
+        this.settings = { ...this.settings, selectedMedia: response.media };
+        this.mediaSync = { clientRevision: response.clientRevision, serverRevision: response.serverRevision, state: 'synced', message: 'Format synchronized with the portal.' };
+        this.log('media_synced');
+      } else {
+        this.settings = { ...this.settings, selectedMedia: current.media };
+        this.mediaSync = { clientRevision: Math.max(this.mediaSync.clientRevision, current.clientRevision), serverRevision: current.serverRevision,
+          state: current.media ? 'synced' : 'not_selected', message: current.media ? `Synced — ${current.media.widthMm} × ${current.media.heightMm} mm` : 'Select a label format.' };
+        if (changedRemotely) this.log('portal_media_applied');
+      }
+      this.commitSession(this.settings, this.identity); this.setRuntime({});
     } catch (error) {
-      const unsupported = error instanceof PortalHttpError && [404, 405, 501].includes(error.status);
-      this.mediaSync = { ...this.mediaSync, state: unsupported ? 'unsupported' : 'pending',
-        message: unsupported ? 'Portal does not support label-format sync yet; selection is saved locally.' : 'Format saved locally; waiting to sync with the portal.' };
-      this.commitSession(this.settings, this.identity); this.log(unsupported ? 'media_sync_unsupported' : 'media_sync_pending', media.formatId); this.setRuntime({});
+      if (error instanceof StorageError || error instanceof ConnectorRevokedError) throw error;
+      if (signal?.aborted) return;
+      const status = error instanceof PortalHttpError ? error.status : undefined;
+      const unsupported = status !== undefined && [404, 405, 501].includes(status);
+      this.mediaSync = { ...this.mediaSync, state: unsupported ? 'unsupported' : status === 409 ? 'conflict' : status === 400 || status === 422 ? 'error' : 'pending',
+        message: unsupported ? 'Portal does not support label-format sync yet; selection is saved locally.' : status === 409 ? 'Format conflict: choose the portal or local format.' : status === 400 || status === 422 ? 'The portal rejected the format. Check the printer and label dimensions.' : 'Format saved locally; waiting to sync with the portal.' };
+      this.commitSession(this.settings, this.identity); this.log('media_sync_failed', status ? `HTTP ${status}` : 'Connection unavailable'); this.setRuntime({});
     }
+  }
+  async resolveMediaConflict(choice: 'portal' | 'local'): Promise<void> {
+    this.healthy(); if (!this.identity) throw new Error('Pair this Connector first');
+    if (!['portal', 'local'].includes(choice)) throw new Error('Invalid conflict resolution');
+    await this.mediaWork;
+    const client = new PortalClient(this.identity, this.fetchFn, this.options.requestTimeoutMs);
+    const current = MediaSyncResponse.parse(await client.request(`/api/print/connectors/${encodeURIComponent(this.identity.connectorId)}/media`));
+    if (choice === 'portal') this.settings = { ...this.settings, selectedMedia: current.media };
+    this.mediaSync = { clientRevision: Math.max(this.mediaSync.clientRevision, current.clientRevision), serverRevision: current.serverRevision,
+      state: choice === 'local' ? 'pending' : current.media ? 'synced' : 'not_selected', message: null };
+    this.commitSession(this.settings, this.identity);
+    await this.syncMedia(client); this.setRuntime({});
   }
   private async run(identity: SessionIdentity): Promise<void> {
     const client = new PortalClient(identity, this.fetchFn, this.options.requestTimeoutMs);
@@ -230,16 +265,17 @@ export class ConnectorService {
         await processor.recover(signal);
         if (this.stopped) break;
         if (this.now().getTime() >= heartbeatAt) {
+          await this.syncMedia(client, signal);
           await client.request(`/api/print/connectors/${encodeURIComponent(identity.connectorId)}/heartbeat`, {
-            method: 'POST', body: JSON.stringify({ version: this.options.version, os: this.options.os, deviceName: this.settings.printerName }),
+            method: 'POST', body: JSON.stringify({ version: this.options.version, os: this.options.os, deviceName: this.settings.printerName, mediaClientRevision: this.mediaSync.clientRevision, mediaServerRevision: this.mediaSync.state === 'synced' ? this.mediaSync.serverRevision : null }),
           }, signal);
           this.setRuntime({ state: 'online', message: 'Connected; waiting for print jobs', lastHeartbeatAt: this.now().toISOString(), lastError: null });
-          if (this.settings.selectedMedia && this.mediaSync.state !== 'synced') await this.syncMedia(client, signal);
           heartbeatAt = this.now().getTime() + 30_000;
         }
+        if (this.settings.selectedMedia && !['synced', 'unsupported'].includes(this.mediaSync.state)) { await this.wait(1000, signal); continue; }
         const rawJob = await client.request(`/api/print/connectors/${encodeURIComponent(identity.connectorId)}/claim`, {}, signal);
         if (this.stopped) break;
-        if (rawJob) await processor.process(rawJob, this.settings.printerName, signal); else await this.wait(1_000, signal);
+        if (rawJob) await processor.process(rawJob, this.settings.printerName, signal, this.settings.selectedMedia); else await this.wait(1_000, signal);
         failures = 0;
       } catch (error) {
         if (error instanceof StorageError) throw error;

@@ -11,6 +11,7 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 export function App() {
   const { status, loadError, refresh } = useConnectorStatus();
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [dirty, setDirty] = useState(false);
   const [formInitialized, setFormInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -18,10 +19,10 @@ export function App() {
   const [logs, setLogs] = useState<ActivityLogEntry[] | null>(null);
 
   useEffect(() => {
-    if (!status || formInitialized) return;
+    if (!status || (formInitialized && dirty)) return;
     setForm({ portalUrl: status.portalUrl, connectorName: status.connectorName, printerName: status.printerName, selectedMedia: status.selectedMedia, allowInsecureHttp: status.allowInsecureHttp, startAtLogin: status.startAtLogin, pairingCode: '' });
     setFormInitialized(true);
-  }, [status, formInitialized]);
+  }, [status, formInitialized, dirty]);
 
   const reloadLogs = async () => {
     try { setLogs(await window.sitremConnector.getLogs()); }
@@ -29,7 +30,7 @@ export function App() {
   };
   useEffect(() => { void reloadLogs(); }, []);
 
-  const update = (field: keyof FormState, value: string) => setForm((current) => ({ ...current, [field]: value }));
+  const update = (field: keyof FormState, value: string) => (setDirty(true), setForm((current) => ({ ...current, [field]: value })));
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -44,6 +45,7 @@ export function App() {
         await window.sitremConnector.saveSettings(form);
         setSuccess('Settings saved.');
       }
+      setDirty(false);
       const next = await refresh();
       setForm({ portalUrl: next.portalUrl, connectorName: next.connectorName, printerName: next.printerName, selectedMedia: next.selectedMedia, allowInsecureHttp: next.allowInsecureHttp, startAtLogin: next.startAtLogin, pairingCode: '' });
       await reloadLogs();
@@ -74,7 +76,7 @@ export function App() {
   const selectedMedia = form.selectedMedia;
   const selectedTestPreset = selectedMedia && VRETTI_420B_STOCK_PRESETS.some((preset) => preset.id === selectedMedia.formatId && preset.widthMm === selectedMedia.widthMm && preset.heightMm === selectedMedia.heightMm)
     ? selectedMedia.formatId : selectedMedia ? 'custom' : '';
-  const setMedia = (formatId: string, widthMm: number, heightMm: number) => setForm((current) => ({ ...current, selectedMedia: { formatId, widthMm, heightMm, catalogVersion: 1 } }));
+  const setMedia = (formatId: string, widthMm: number, heightMm: number) => (setDirty(true), setForm((current) => ({ ...current, selectedMedia: { formatId, widthMm, heightMm, catalogVersion: 1 } })));
 
   return (
     <main className="wrap">
@@ -83,14 +85,15 @@ export function App() {
       <p>Pair this computer with your portal and choose the system printer that receives labels.</p>
       <ConnectionStatus status={status} />
       {status?.mediaSync.message && <div className={status.mediaSync.state === 'synced' ? 'success' : 'error'} role="status">{status.mediaSync.message}</div>}
+      {status?.mediaSync.state === 'conflict' && <div className="buttons">{(['portal', 'local'] as const).map(choice => <button key={choice} type="button" disabled={busy} onClick={async () => { setBusy(true); try { await window.sitremConnector.resolveMediaConflict?.(choice); setDirty(false); await refresh(); } catch (caught) { setError(errorMessage(caught)); } finally { setBusy(false); } }}>{choice === 'portal' ? 'Use portal format' : 'Keep local format'}</button>)}</div>}
       {!!status?.recoveryJobIds.length && <div role="alert" className="error">
         Saved print outcomes need review in the portal. Check physical output before replacing these jobs: {status.recoveryJobIds.join(', ')}.
       </div>}
       <form onSubmit={submit}>
         <label className="field" htmlFor="portalUrl">Portal URL</label>
         <input id="portalUrl" type="url" value={form.portalUrl} onChange={(event) => update('portalUrl', event.target.value)} placeholder="http://localhost:3000 or https://sitrem.example.com" required />
-        <label><input type="checkbox" checked={form.allowInsecureHttp ?? false} onChange={(event) => setForm((value) => ({ ...value, allowInsecureHttp: event.target.checked }))} /> Allow insecure HTTP on a trusted LAN (credentials are not protected in transit)</label>
-        <label><input type="checkbox" checked={form.startAtLogin ?? false} onChange={(event) => setForm((value) => ({ ...value, startAtLogin: event.target.checked }))} /> Start when I sign in</label>
+        <label><input type="checkbox" checked={form.allowInsecureHttp ?? false} onChange={(event) => { setDirty(true); setForm((value) => ({ ...value, allowInsecureHttp: event.target.checked })); }} /> Allow insecure HTTP on a trusted LAN (credentials are not protected in transit)</label>
+        <label><input type="checkbox" checked={form.startAtLogin ?? false} onChange={(event) => { setDirty(true); setForm((value) => ({ ...value, startAtLogin: event.target.checked })); }} /> Start when I sign in</label>
 
         <label className="field" htmlFor="connectorName">Connector name</label>
         <input id="connectorName" value={form.connectorName} onChange={(event) => update('connectorName', event.target.value)} placeholder="Reception Vretti 420B" required />

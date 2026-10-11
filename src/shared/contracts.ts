@@ -32,7 +32,7 @@ export type EditableSettings = z.infer<typeof EditableSettingsSchema>;
 export const MediaSyncSchema = z.object({
   clientRevision: z.number().int().nonnegative().default(0),
   serverRevision: z.number().int().nonnegative().nullable().default(null),
-  state: z.enum(['not_selected', 'pending', 'synced', 'unsupported', 'error']).default('not_selected'),
+  state: z.enum(['not_selected', 'pending', 'synced', 'unsupported', 'error', 'conflict']).default('not_selected'),
   message: z.string().max(500).nullable().default(null),
 }).strict();
 export type MediaSync = z.infer<typeof MediaSyncSchema>;
@@ -84,6 +84,7 @@ export interface ConnectorApi {
   getStatus(): Promise<ConnectorStatus>;
   pair(input: PairingInput): Promise<PairingResult>;
   saveSettings(input: EditableSettings): Promise<void>;
+  resolveMediaConflict?(choice: 'portal' | 'local'): Promise<void>;
   testPrint(size: z.infer<typeof LabelSizeSchema>): Promise<void>;
   getLogs(): Promise<ActivityLogEntry[]>;
   openPrinterSettings(): Promise<void>;

@@ -63,7 +63,7 @@ export class JobProcessor {
     }
   }
 
-  async process(raw: unknown, printerName: string, signal: AbortSignal): Promise<void> {
+  async process(raw: unknown, printerName: string, signal: AbortSignal, media?: { widthMm: number; heightMm: number } | null): Promise<void> {
     let job;
     try {
       job = parsePrintJobPayload(raw);
@@ -84,6 +84,12 @@ export class JobProcessor {
     }
     const old = this.journal.find(this.client.identity.portalUrl, job.connectorId, job.jobId);
     if (old) { await this.replay(old, signal); return; }
+    if (media && (Math.abs(media.widthMm - job.widthMm) >= 0.05 || Math.abs(media.heightMm - job.heightMm) >= 0.05)) {
+      const rejected: Receipt = { portalUrl: this.client.identity.portalUrl, connectorId: job.connectorId, jobId: job.jobId,
+        state: 'rejected', updatedAt: this.now().getTime(), acknowledged: false,
+        acknowledgement: { result: 'error', errorCode: 'MEDIA_MISMATCH', errorMessage: 'This queued label uses another format. Replace it using the current printer format.' } };
+      this.journal.put(rejected); await this.acknowledge(rejected, signal); this.log('media_mismatch', job.jobId); return;
+    }
     let entry: Receipt = { portalUrl: this.client.identity.portalUrl, connectorId: job.connectorId, jobId: job.jobId,
       idempotencyKey: job.idempotencyKey, state: 'leased', updatedAt: this.now().getTime(), acknowledged: false };
     this.journal.put(entry);

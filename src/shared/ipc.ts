@@ -6,6 +6,7 @@
 export const IPC_CHANNELS = {
   getStatus: 'connector:get-status',
   pair: 'connector:pair',
+  resolveMediaConflict: 'connector:resolve-media-conflict',
   saveSettings: 'connector:save-settings',
   testPrint: 'connector:test-print',
   getLogs: 'connector:get-logs',

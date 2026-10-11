@@ -20,6 +20,16 @@ function setup(fetchFn: typeof fetch, print: PrintEngine['print'] = vi.fn(async 
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('durable job recovery', () => {
+  it('rejects incompatible loaded stock and preserves the rejection on replay', async () => {
+    const { journal, processor, print } = setup(vi.fn(async () => response()));
+    await processor.process(payload(), 'Printer', new AbortController().signal, { widthMm: 60, heightMm: 40 });
+    expect(journal.all()[0]).toMatchObject({ state: 'rejected', acknowledged: true, acknowledgement: { result: 'error', errorCode: 'MEDIA_MISMATCH' } });
+    await processor.process(payload(), 'Printer', new AbortController().signal, { widthMm: 50, heightMm: 30 });
+    expect(print).not.toHaveBeenCalled();
+    await processor.process(payload('replacement'), 'Printer', new AbortController().signal, { widthMm: 50, heightMm: 30 });
+    expect(print).toHaveBeenCalledOnce();
+  });
+
   it.each(['error', 'attention', 'spooled'])('reconciles a lost %s acknowledgement without printing again', async result => {
     const fetchFn = vi.fn(async (url: RequestInfo | URL) => String(url).endsWith('/state') ? response(200, { id: 'job-1', status: result === 'error' ? 'failed' : result, errorCode: result === 'error' ? 'INVALID_PAYLOAD' : 'UNKNOWN_RESULT' }) : response(409));
     const { journal, processor, print } = setup(fetchFn);

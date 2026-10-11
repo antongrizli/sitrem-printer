@@ -80,11 +80,12 @@ describe('ConnectorService', () => {
     credentials(directory);
     const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).toBe('http://127.0.0.1:3000/api/print/connectors/connector-1/media');
+      if (init?.method !== 'PUT') return response(200, { schemaVersion: 1, connectorId: 'connector-1', clientRevision: 0, serverRevision: 0, isDefaultConnector: true, media: null, effectiveDefaultMedia: null });
       expect(init?.method).toBe('PUT');
-      expect(JSON.parse(String(init?.body))).toEqual({ schemaVersion: 1, clientRevision: 1, expectedServerRevision: null,
+      expect(JSON.parse(String(init?.body))).toEqual({ schemaVersion: 1, clientRevision: 1, expectedServerRevision: 0,
         deviceName: 'VRETTI 420B', media: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 } });
       return response(200, { clientRevision: 1, serverRevision: 4, isDefaultConnector: true,
-        effectiveMedia: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 } });
+        schemaVersion: 1, connectorId: 'connector-1', effectiveDefaultMedia: null, media: { formatId: 'stock_70x25', widthMm: 70, heightMm: 25, catalogVersion: 1 } });
     });
     const service = new ConnectorService({ userDataPath: directory, secureStorage, printer: printer(), version: '1', os: 'darwin', fetchFn });
     await service.saveSettings({ portalUrl: 'http://127.0.0.1:3000', connectorName: 'Test Connector', printerName: 'VRETTI 420B',
@@ -154,7 +155,7 @@ describe('ConnectorService', () => {
     service.start();
     await vi.waitFor(() => expect(print).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(requestBodies).toContainEqual({ result: 'spooled' }));
-    expect(requestBodies).toContainEqual({ version: '1.2.3', os: 'darwin', deviceName: 'VRETTI 420B' });
+    expect(requestBodies).toContainEqual(expect.objectContaining({ version: '1.2.3', os: 'darwin', deviceName: 'VRETTI 420B', mediaClientRevision: 0, mediaServerRevision: null }));
     expect(JSON.parse(readFileSync(join(directory, 'print-journal.json'), 'utf8'))).toMatchObject({ schemaVersion: 2, entries: [{ state: 'spooled', acknowledged: true }] });
   });
 
@@ -186,5 +187,42 @@ describe('ConnectorService', () => {
     const service = new ConnectorService({ userDataPath: directory, secureStorage, printer: printer(), version: '1', os: 'darwin', fetchFn: vi.fn(async () => response(401, { error: 'revoked' })), delay: async () => undefined });
     service.start();
     await vi.waitFor(async () => expect((await service.getStatus()).state).toBe('revoked'));
+  });
+});
+
+
+describe('portal media contract and conflicts', () => {
+  const media = { formatId: 'custom', widthMm: 70, heightMm: 25, catalogVersion: 1 as const };
+  function session(directory: string) {
+    writeFileSync(join(directory, 'connector-session.json'), JSON.stringify({ schemaVersion: 2,
+      connectorId: 'connector-1', token: Buffer.from('secret').toString('base64'),
+      settings: { portalUrl: 'http://127.0.0.1:3000', connectorName: 'Test', printerName: 'VRETTI 420B', selectedMedia: media },
+      mediaSync: { clientRevision: 1, serverRevision: 1, state: 'synced', message: null } }));
+  }
+  it('applies a remote format and confirms the revision without echoing a PUT', async () => {
+    const directory = temporaryDirectory(); session(directory);
+    const remote = { ...media, widthMm: 60 }; let service: ConnectorService;
+    const fetchFn = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input).endsWith('/media')) return response(200, { schemaVersion: 1, connectorId: 'connector-1', clientRevision: 1, serverRevision: 2, media: remote, isDefaultConnector: true, effectiveDefaultMedia: null, acceptedAt: null, deviceName: 'VRETTI 420B' });
+      if (String(input).endsWith('/heartbeat')) return response(200, { mediaServerRevision: 2 });
+      return response(204);
+    });
+    service = new ConnectorService({ userDataPath: directory, secureStorage, printer: printer(), version: '1', os: 'darwin', fetchFn, delay: async () => { service.stop(); } });
+    service.start(); await vi.waitFor(() => expect(fetchFn.mock.calls.some(([url]) => String(url).endsWith('/heartbeat'))).toBe(true)); await service.shutdown();
+    expect((await service.getStatus()).selectedMedia).toEqual(remote);
+    expect(fetchFn.mock.calls.some(([, init]) => (init as RequestInit)?.method === 'PUT')).toBe(false);
+    const heartbeat = fetchFn.mock.calls.find(([url]) => String(url).endsWith('/heartbeat'))!;
+    expect(JSON.parse(String((heartbeat[1] as RequestInit).body))).toMatchObject({ mediaServerRevision: 2 });
+  });
+  it('preserves a local draft on conflict and explicitly accepts the portal format', async () => {
+    const directory = temporaryDirectory(); session(directory); const remote = { ...media, widthMm: 60 };
+    const fetchFn = vi.fn(async () => response(200, { schemaVersion: 1, connectorId: 'connector-1', clientRevision: 1, serverRevision: 2, media: remote, isDefaultConnector: true, effectiveDefaultMedia: null }));
+    const service = new ConnectorService({ userDataPath: directory, secureStorage, printer: printer(), version: '1', os: 'darwin', fetchFn });
+    await service.saveSettings({ portalUrl: 'http://127.0.0.1:3000', connectorName: 'Test', printerName: 'VRETTI 420B', selectedMedia: { ...media, widthMm: 80 } });
+    expect((await service.getStatus()).mediaSync.state).toBe('conflict');
+    expect((await service.getStatus()).selectedMedia?.widthMm).toBe(80);
+    await service.resolveMediaConflict('portal');
+    expect((await service.getStatus()).selectedMedia?.widthMm).toBe(60);
+    expect((await service.getStatus()).mediaSync.state).toBe('synced');
   });
 });
